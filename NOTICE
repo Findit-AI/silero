@@ -1,0 +1,22 @@
+silero
+Copyright 2026 joe
+
+This product includes a Rust port of the inference pipeline of
+Silero VAD, licensed under the MIT license:
+
+  Silero VAD
+  Copyright (c) 2020-present Silero Team
+  https://github.com/snakers4/silero-vad
+
+This product also redistributes the bundled ONNX model file
+(models/silero_vad.onnx, ~2.3 MB), which is the trained Silero VAD
+neural network in ONNX format. The model is the work of the Silero
+Team and is also licensed under the MIT license. Their copyright,
+license, and full attribution apply to the model file.
+
+The Rust port itself is dual-licensed under MIT and Apache-2.0 at
+the user's option. See LICENSE-MIT and LICENSE-APACHE.
+
+This crate is not affiliated with or endorsed by the Silero Team.
+The original project lives at https://github.com/snakers4/silero-vad
+and remains the canonical source for the model.
