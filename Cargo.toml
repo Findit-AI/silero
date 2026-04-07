@@ -1,42 +1,49 @@
 [package]
-name = "template-rs"
-version = "0.0.0"
-edition = "2021"
-repository = "https://github.com/al8n/template-rs"
-homepage = "https://github.com/al8n/template-rs"
-documentation = "https://docs.rs/template-rs"
-description = "A template for creating Rust open-source repo on GitHub"
+name = "silero"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+repository = "https://github.com/Findit-AI/silero"
+homepage = "https://github.com/Findit-AI/silero"
+documentation = "https://docs.rs/silero"
+description = "Production-oriented Rust wrapper for the Silero VAD ONNX model."
+keywords = ["vad", "voice-detection", "silero-vad", "speech", "onnx"]
+categories = ["multimedia::audio", "science"]
 license = "MIT OR Apache-2.0"
-rust-version = "1.73"
-
-[[bench]]
-path = "benches/foo.rs"
-name = "foo"
-harness = false
+readme = "README.md"
+include = [
+  "Cargo.toml",
+  "README.md",
+  "THIRD_PARTY_NOTICES.md",
+  "LICENSE-APACHE",
+  "LICENSE-MIT",
+  "models/silero_vad.onnx",
+  "src/**",
+  "build.rs",
+  "examples/**",
+  "tests/**",
+]
 
 [features]
-default = ["std"]
-alloc = []
-std = []
+default = ["bundled"]
+bundled = []
 
 [dependencies]
+ort = "2.0.0-rc.12"
+thiserror = "2"
 
 [dev-dependencies]
-criterion = "0.8"
-tempfile = "3"
+hound = "3"
 
-[profile.bench]
-opt-level = 3
-debug = false
-codegen-units = 1
-lto = 'thin'
-incremental = false
-debug-assertions = false
-overflow-checks = false
-rpath = false
+[[example]]
+name = "detect_file"
+path = "examples/detect_file.rs"
+
+[[example]]
+name = "streaming"
+path = "examples/streaming.rs"
 
 [package.metadata.docs.rs]
-all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [lints.rust]
