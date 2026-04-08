@@ -8,7 +8,7 @@ repository = "https://github.com/Findit-AI/silero"
 homepage = "https://github.com/Findit-AI/silero"
 documentation = "https://docs.rs/silero"
 description = "Production-oriented Rust wrapper for the Silero VAD ONNX model."
-keywords = ["vad", "voice-activity-detection", "silero", "speech", "onnx"]
+keywords = ["vad", "voice-activity-detection", "silero-vad", "speech", "onnx"]
 categories = ["multimedia::audio", "science"]
 license = "MIT OR Apache-2.0"
 readme = "README.md"
@@ -17,7 +17,6 @@ include = [
   "README.md",
   "LICENSE-APACHE",
   "LICENSE-MIT",
-  "NOTICE",
   "models/silero_vad.onnx",
   "src/**",
   "examples/**",

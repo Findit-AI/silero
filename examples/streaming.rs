@@ -1,7 +1,12 @@
 use silero::{Session, SpeechOptions, SpeechSegmenter, StreamState};
 
+const MODEL_BYTES: &[u8] = include_bytes!(concat!(
+  env!("CARGO_MANIFEST_DIR"),
+  "/models/silero_vad.onnx"
+));
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-  let mut session = Session::bundled()?;
+  let mut session = Session::from_memory(MODEL_BYTES)?;
   let config = SpeechOptions::default();
   let mut stream = StreamState::new(config.sample_rate());
   let mut segmenter = SpeechSegmenter::new(config);

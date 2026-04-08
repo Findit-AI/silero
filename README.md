@@ -55,8 +55,9 @@ Because of that, the crate exposes three core building blocks:
 use silero::{Session, SpeechOptions, detect_speech};
 
 fn main() -> Result<(), silero::Error> {
+    let model = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/models/silero_vad.onnx"));
     let audio_16k: Vec<f32> = vec![0.0; 16_000];
-    let mut session = Session::bundled()?;
+    let mut session = Session::from_memory(model)?;
     let segments = detect_speech(&mut session, &audio_16k, SpeechOptions::default())?;
 
     println!("detected {} speech segments", segments.len());
@@ -70,7 +71,8 @@ fn main() -> Result<(), silero::Error> {
 use silero::{Session, SpeechOptions, SpeechSegmenter, StreamState};
 
 fn main() -> Result<(), silero::Error> {
-    let mut session = Session::bundled()?;
+    let model = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/models/silero_vad.onnx"));
+    let mut session = Session::from_memory(model)?;
     let config = SpeechOptions::default();
     let mut stream = StreamState::new(config.sample_rate());
     let mut segmenter = SpeechSegmenter::new(config);
@@ -104,7 +106,8 @@ rate**, not consecutive chunks from one stream.
 ```rust
 use silero::{BatchInput, SampleRate, Session, StreamState};
 
-let mut session = Session::bundled().unwrap();
+let model = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/models/silero_vad.onnx"));
+let mut session = Session::from_memory(model).unwrap();
 let mut a = StreamState::new(SampleRate::Rate16k);
 let mut b = StreamState::new(SampleRate::Rate16k);
 let chunk_a = vec![0.0_f32; 512];
@@ -123,7 +126,7 @@ assert_eq!(probabilities.len(), 2);
 
 The crate bundles `models/silero_vad.onnx` and exposes:
 
-- `Session::bundled()`
+- `Session::bundled()` when the `bundled` feature is enabled
 - `Session::from_file(...)`
 - `Session::from_memory(...)`
 - `Session::from_ort_session(...)`

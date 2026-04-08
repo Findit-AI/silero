@@ -93,6 +93,18 @@ impl SpeechSegmenter {
     &self.options
   }
 
+  /// Reconfigure the segmenter for a stream with a different sample rate.
+  ///
+  /// Changing sample rate starts a new logical timeline, so any
+  /// in-flight segment state is cleared.
+  #[inline]
+  pub fn set_sample_rate(&mut self, sample_rate: SampleRate) {
+    if self.sample_rate() != sample_rate {
+      self.options = self.options.with_sample_rate(sample_rate);
+      self.reset();
+    }
+  }
+
   /// Returns the sample rate used by this segmenter.
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn sample_rate(&self) -> SampleRate {
@@ -323,5 +335,22 @@ mod tests {
     assert!(segmenter.is_active());
     segmenter.reset();
     assert!(!segmenter.is_active());
+  }
+
+  #[test]
+  fn set_sample_rate_resets_runtime_state_and_updates_timeline_rate() {
+    let mut segmenter = SpeechSegmenter::new(SpeechOptions::default());
+    let _ = segmenter.push_probability(0.9);
+    assert!(segmenter.is_active());
+
+    segmenter.set_sample_rate(SampleRate::Rate8k);
+    assert_eq!(segmenter.sample_rate(), SampleRate::Rate8k);
+    assert!(!segmenter.is_active());
+
+    for _ in 0..frame_count(320, SampleRate::Rate8k) {
+      let _ = segmenter.push_probability(0.9);
+    }
+    let segment = segmenter.finish().expect("trailing segment");
+    assert_eq!(segment.sample_rate(), SampleRate::Rate8k);
   }
 }

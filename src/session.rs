@@ -6,7 +6,7 @@ use crate::{
   Result,
   error::Error,
   options::SessionOptions,
-  stream::{MAX_CHUNK_SAMPLES, STATE_HIDDEN_DIM, STATE_LAYERS, StreamState},
+  stream::{MAX_CHUNK_SAMPLES, STATE_HIDDEN_DIM, STATE_LAYERS, STATE_VALUES, StreamState},
 };
 
 const INPUT_NAME: &str = "input";
@@ -61,6 +61,7 @@ pub struct Session {
   inner: OrtSession,
   input_scratch: Vec<f32>,
   state_scratch: Vec<f32>,
+  tail_scratch: Vec<f32>,
 }
 
 impl Session {
@@ -85,13 +86,13 @@ impl Session {
 
   /// Create a session from an ONNX file at the given path with custom options.
   pub fn from_file_with_options(path: impl AsRef<Path>, options: SessionOptions) -> Result<Self> {
-    let path = path.as_ref().to_path_buf();
+    let path = path.as_ref();
     let session = OrtSession::builder()?
       .with_optimization_level(options.optimization_level())
       .map_err(ort::Error::from)?
-      .commit_from_file(&path)
+      .commit_from_file(path)
       .map_err(|source| Error::LoadModel {
-        path: path.clone(),
+        path: path.to_path_buf(),
         source,
       })?;
     Ok(Self::from_ort_session(session))
@@ -118,11 +119,28 @@ impl Session {
       inner,
       input_scratch: Vec::new(),
       state_scratch: Vec::new(),
+      tail_scratch: Vec::with_capacity(MAX_CHUNK_SAMPLES),
     }
   }
 
   /// Infer one chunk for one stream, returning the speech probability for that chunk.
   pub fn infer_chunk(&mut self, stream: &mut StreamState, chunk: &[f32]) -> Result<f32> {
+    Self::infer_chunk_with_scratch(
+      &mut self.inner,
+      &mut self.input_scratch,
+      &mut self.state_scratch,
+      stream,
+      chunk,
+    )
+  }
+
+  fn infer_chunk_with_scratch(
+    inner: &mut OrtSession,
+    input_scratch: &mut Vec<f32>,
+    state_scratch: &mut Vec<f32>,
+    stream: &mut StreamState,
+    chunk: &[f32],
+  ) -> Result<f32> {
     let sample_rate = stream.sample_rate();
     let chunk_samples = sample_rate.chunk_samples();
     if chunk.len() != chunk_samples {
@@ -135,21 +153,21 @@ impl Session {
     let context_samples = sample_rate.context_samples();
     let input_len = chunk_samples + context_samples;
 
-    self.input_scratch.clear();
-    self.input_scratch.reserve(input_len);
-    self.input_scratch.extend_from_slice(stream.context());
-    self.input_scratch.extend_from_slice(chunk);
+    input_scratch.clear();
+    input_scratch.reserve(input_len);
+    input_scratch.extend_from_slice(stream.context());
+    input_scratch.extend_from_slice(chunk);
 
-    self.state_scratch.clear();
-    self.state_scratch.reserve(STATE_LAYERS * STATE_HIDDEN_DIM);
+    state_scratch.clear();
+    state_scratch.reserve(STATE_VALUES);
     for layer in 0..STATE_LAYERS {
-      self.state_scratch.extend_from_slice(stream.layer(layer));
+      state_scratch.extend_from_slice(stream.layer(layer));
     }
 
     let sample_rate_hz = [i64::from(sample_rate.hz())];
-    let outputs = self.inner.run(ort::inputs![
-      INPUT_NAME => TensorRef::from_array_view(([1usize, input_len], self.input_scratch.as_slice()))?,
-      STATE_NAME => TensorRef::from_array_view(([STATE_LAYERS, 1usize, STATE_HIDDEN_DIM], self.state_scratch.as_slice()))?,
+    let outputs = inner.run(ort::inputs![
+      INPUT_NAME => TensorRef::from_array_view(([1usize, input_len], input_scratch.as_slice()))?,
+      STATE_NAME => TensorRef::from_array_view(([STATE_LAYERS, 1usize, STATE_HIDDEN_DIM], state_scratch.as_slice()))?,
       SR_NAME => TensorRef::from_array_view((SCALAR_SHAPE, &sample_rate_hz[..]))?,
     ])?;
 
@@ -162,8 +180,12 @@ impl Session {
     }
 
     let (state_shape, state_data) = outputs[STATE_N_NAME].try_extract_tensor::<f32>()?;
-    let expected_state_values = STATE_LAYERS * STATE_HIDDEN_DIM;
-    if state_data.len() != expected_state_values {
+    validate_shape(
+      STATE_N_NAME,
+      state_shape.as_ref(),
+      &[STATE_LAYERS as i64, 1, STATE_HIDDEN_DIM as i64],
+    )?;
+    if state_data.len() != STATE_VALUES {
       return Err(Error::UnexpectedOutputShape {
         tensor: STATE_N_NAME,
         shape: state_shape.as_ref().to_vec(),
@@ -221,9 +243,7 @@ impl Session {
     }
 
     self.state_scratch.clear();
-    self
-      .state_scratch
-      .reserve(STATE_LAYERS * batch_size * STATE_HIDDEN_DIM);
+    self.state_scratch.reserve(STATE_VALUES * batch_size);
     for layer in 0..STATE_LAYERS {
       for item in batch.iter() {
         self
@@ -249,7 +269,13 @@ impl Session {
     }
 
     let (state_shape, state_data) = outputs[STATE_N_NAME].try_extract_tensor::<f32>()?;
-    let expected_state_values = STATE_LAYERS * batch_size * STATE_HIDDEN_DIM;
+    let expected_state_shape = [
+      STATE_LAYERS as i64,
+      batch_size as i64,
+      STATE_HIDDEN_DIM as i64,
+    ];
+    validate_shape(STATE_N_NAME, state_shape.as_ref(), &expected_state_shape)?;
+    let expected_state_values = STATE_VALUES * batch_size;
     if state_data.len() != expected_state_values {
       return Err(Error::UnexpectedOutputShape {
         tensor: STATE_N_NAME,
@@ -302,12 +328,19 @@ impl Session {
       }
 
       let pending_len = stream.pending_len();
-      let mut first_frame = [0.0; MAX_CHUNK_SAMPLES];
-      first_frame[..pending_len].copy_from_slice(stream.pending());
-      first_frame[pending_len..chunk_samples].copy_from_slice(&samples[..needed]);
+      self.tail_scratch.clear();
+      self.tail_scratch.resize(chunk_samples, 0.0);
+      self.tail_scratch[..pending_len].copy_from_slice(stream.pending());
+      self.tail_scratch[pending_len..chunk_samples].copy_from_slice(&samples[..needed]);
       stream.clear_pending();
 
-      let probability = self.infer_chunk(stream, &first_frame[..chunk_samples])?;
+      let probability = Self::infer_chunk_with_scratch(
+        &mut self.inner,
+        &mut self.input_scratch,
+        &mut self.state_scratch,
+        stream,
+        &self.tail_scratch[..chunk_samples],
+      )?;
       on_probability(probability);
       frames += 1;
       offset = needed;
@@ -337,12 +370,32 @@ impl Session {
     }
 
     let chunk_samples = stream.sample_rate().chunk_samples();
-    let mut padded = [0.0; MAX_CHUNK_SAMPLES];
+    self.tail_scratch.clear();
+    self.tail_scratch.resize(chunk_samples, 0.0);
     let pending_len = stream.pending_len();
-    padded[..pending_len].copy_from_slice(stream.pending());
+    self.tail_scratch[..pending_len].copy_from_slice(stream.pending());
     stream.clear_pending();
 
-    self.infer_chunk(stream, &padded[..chunk_samples]).map(Some)
+    Self::infer_chunk_with_scratch(
+      &mut self.inner,
+      &mut self.input_scratch,
+      &mut self.state_scratch,
+      stream,
+      &self.tail_scratch[..chunk_samples],
+    )
+    .map(Some)
+  }
+}
+
+#[inline]
+fn validate_shape(tensor: &'static str, actual: &[i64], expected: &[i64]) -> Result<()> {
+  if actual == expected {
+    Ok(())
+  } else {
+    Err(Error::UnexpectedOutputShape {
+      tensor,
+      shape: actual.to_vec(),
+    })
   }
 }
 
@@ -350,7 +403,7 @@ impl Session {
 mod tests {
   use crate::{SampleRate, StreamState};
 
-  use super::Session;
+  use super::{Session, validate_shape};
 
   #[test]
   fn flush_stream_without_pending_is_noop() {
@@ -361,5 +414,12 @@ mod tests {
     .expect("bundled model should load");
     let mut stream = StreamState::new(SampleRate::Rate16k);
     assert!(session.flush_stream(&mut stream).expect("flush").is_none());
+  }
+
+  #[test]
+  fn validate_shape_requires_exact_dimension_order() {
+    assert!(validate_shape("stateN", &[2, 3, 128], &[2, 3, 128]).is_ok());
+    assert!(validate_shape("stateN", &[3, 2, 128], &[2, 3, 128]).is_err());
+    assert!(validate_shape("stateN", &[2, 384], &[2, 3, 128]).is_err());
   }
 }

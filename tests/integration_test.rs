@@ -1,5 +1,14 @@
 use silero::{BatchInput, SampleRate, Session, SpeechOptions, StreamState, detect_speech};
 
+const MODEL_BYTES: &[u8] = include_bytes!(concat!(
+  env!("CARGO_MANIFEST_DIR"),
+  "/models/silero_vad.onnx"
+));
+
+fn test_session() -> Session {
+  Session::from_memory(MODEL_BYTES).expect("test model should load")
+}
+
 fn pseudo_audio(len: usize) -> Vec<f32> {
   let mut value = 0x1234_5678_u32;
   let mut out = Vec::with_capacity(len);
@@ -11,6 +20,7 @@ fn pseudo_audio(len: usize) -> Vec<f32> {
   out
 }
 
+#[cfg(feature = "bundled")]
 #[test]
 fn bundled_session_loads() {
   let _session = Session::bundled().expect("bundled model should load");
@@ -18,7 +28,7 @@ fn bundled_session_loads() {
 
 #[test]
 fn silence_settles_to_low_probability() {
-  let mut session = Session::bundled().expect("bundled model should load");
+  let mut session = test_session();
   let mut stream = StreamState::new(SampleRate::Rate16k);
   let silence = vec![0.0_f32; SampleRate::Rate16k.chunk_samples()];
 
@@ -34,8 +44,8 @@ fn silence_settles_to_low_probability() {
 
 #[test]
 fn batch_inference_matches_single_stream_inference() {
-  let mut single_session = Session::bundled().expect("bundled model should load");
-  let mut batch_session = Session::bundled().expect("bundled model should load");
+  let mut single_session = test_session();
+  let mut batch_session = test_session();
   let mut single_a = StreamState::new(SampleRate::Rate16k);
   let mut single_b = StreamState::new(SampleRate::Rate16k);
   let mut batch_a = StreamState::new(SampleRate::Rate16k);
@@ -93,7 +103,7 @@ fn batch_inference_matches_single_stream_inference() {
 
 #[test]
 fn process_stream_and_flush_cover_partial_tail() {
-  let mut session = Session::bundled().expect("bundled model should load");
+  let mut session = test_session();
   let mut stream = StreamState::new(SampleRate::Rate16k);
   let audio = pseudo_audio(SampleRate::Rate16k.chunk_samples() * 3 + 200);
   let mut probabilities = Vec::new();
@@ -116,7 +126,7 @@ fn process_stream_and_flush_cover_partial_tail() {
 
 #[test]
 fn detect_speech_on_silence_returns_empty() {
-  let mut session = Session::bundled().expect("bundled model should load");
+  let mut session = test_session();
   let audio = vec![0.0_f32; SampleRate::Rate16k.chunk_samples() * 8];
   let segments = detect_speech(
     &mut session,

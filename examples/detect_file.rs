@@ -2,6 +2,11 @@ use std::{env, path::PathBuf};
 
 use silero::{Session, SpeechOptions, detect_speech};
 
+const MODEL_BYTES: &[u8] = include_bytes!(concat!(
+  env!("CARGO_MANIFEST_DIR"),
+  "/models/silero_vad.onnx"
+));
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
   let wav_path: PathBuf = env::args()
     .nth(1)
@@ -25,7 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
   };
 
-  let mut session = Session::bundled()?;
+  let mut session = Session::from_memory(MODEL_BYTES)?;
   let segments = detect_speech(
     &mut session,
     &audio,

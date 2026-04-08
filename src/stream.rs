@@ -42,6 +42,10 @@ impl StreamState {
   }
 
   /// Change the sample rate for this stream, resetting all state and pending samples.
+  ///
+  /// If this stream is paired with a [`crate::SpeechSegmenter`], update
+  /// the segmenter with [`crate::SpeechSegmenter::set_sample_rate`] as
+  /// well so both objects keep the same timeline basis.
   #[inline]
   pub fn set_sample_rate(&mut self, sample_rate: SampleRate) {
     if self.sample_rate != sample_rate {
