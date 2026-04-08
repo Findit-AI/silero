@@ -1,86 +1,55 @@
 [package]
 name = "silero"
-version = "0.1.1"
-edition = "2021"
-rust-version = "1.75"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
 authors = ["joe <srjoe2022@gmail.com>"]
 repository = "https://github.com/Findit-AI/silero"
 homepage = "https://github.com/Findit-AI/silero"
 documentation = "https://docs.rs/silero"
-description = "A Rust implementation of the Silero VAD (Voice Activity Detection) inference pipeline, based on the official Python reference at snakers4/silero-vad."
+description = "Production-oriented Rust wrapper for the Silero VAD ONNX model."
 keywords = ["vad", "voice-activity-detection", "silero", "speech", "onnx"]
 categories = ["multimedia::audio", "science"]
-license = "MIT"
+license = "MIT OR Apache-2.0"
 readme = "README.md"
-
-[dependencies]
-# ONNX inference backend. Pinned to the same version used by our
-# sibling crates (audio-bench, findit-audio) so a single onnxruntime
-# dynamic library can back the whole workspace.
-ort = { version = "2.0.0-rc.12", features = ["ndarray"] }
-
-# Tensor construction for ONNX inputs.
-ndarray = "0.17"
-
-# Typed errors. Keeps downstream error handling ergonomic.
-thiserror = "2"
-
-# Optional I/O helpers. The core crate is I/O free by default so it
-# works in no-std-adjacent contexts (e.g. inside an STT pipeline that
-# already holds decoded PCM). Users that want to open a WAV file or
-# resample arbitrary input can enable the feature flags below.
-hound = { version = "3", optional = true }
-rubato = { version = "0.16", optional = true }
+include = [
+  "Cargo.toml",
+  "README.md",
+  "LICENSE-APACHE",
+  "LICENSE-MIT",
+  "NOTICE",
+  "models/silero_vad.onnx",
+  "src/**",
+  "examples/**",
+  "tests/**",
+]
 
 [features]
-default = []
-# Enables `silero::io` with a small `read_wav` helper (mono f32, 16k/8k).
-wav = ["dep:hound"]
-# Enables `silero::resample::Resampler` for arbitrary input sample rates.
-resample = ["dep:rubato"]
-# Convenience: enable both.
-full = ["wav", "resample"]
+default = ["bundled"]
+bundled = []
+
+[dependencies]
+ort = "2.0.0-rc.12"
+thiserror = "2"
 
 [dev-dependencies]
-# Integration tests need to open WAV files; enable the `wav` feature
-# during tests without forcing it on production consumers.
 hound = "3"
-rubato = "0.16"
-criterion = { version = "0.5", features = ["html_reports"] }
-
-[[bench]]
-path = "benches/vad_bench.rs"
-name = "vad_bench"
-harness = false
 
 [[example]]
 name = "detect_file"
 path = "examples/detect_file.rs"
-required-features = ["wav"]
 
 [[example]]
 name = "streaming"
 path = "examples/streaming.rs"
-required-features = ["wav"]
-
-[[example]]
-name = "compare_vs_audio_bench"
-path = "examples/compare_vs_audio_bench.rs"
-required-features = ["wav"]
-
-[profile.bench]
-opt-level = 3
-debug = false
-codegen-units = 1
-lto = 'thin'
-incremental = false
-debug-assertions = false
-overflow-checks = false
-rpath = false
 
 [package.metadata.docs.rs]
-all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [lints.rust]
 rust_2018_idioms = "warn"
+single_use_lifetimes = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(all_tests)',
+  'cfg(tarpaulin)',
+] }

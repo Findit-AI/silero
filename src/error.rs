@@ -1,71 +1,69 @@
-//! Error types for the `silero` crate.
-
 use std::path::PathBuf;
 
-/// All errors returned by this crate.
-///
-/// Most variants are 1:1 wrappers around lower-level errors from `ort`
-/// and `ndarray`. A small set of variants ([`SileroError::InvalidInput`],
-/// [`SileroError::UnsupportedSampleRate`], etc.) represent contract
-/// violations in the public API — the caller passed an argument that
-/// we can statically rule out.
+/// Errors that can occur during Silero VAD operations.
 #[derive(Debug, thiserror::Error)]
-pub enum SileroError {
-  /// Failed to load the ONNX model from the given path.
-  ///
-  /// The `path` is included so the error message is actionable.
-  #[error("failed to load Silero VAD model from {path}: {source}")]
+pub enum Error {
+  /// Errors related to loading the ONNX model, including file I/O and ONNX runtime errors.
+  #[error("failed to load Silero model from {path}: {source}")]
   LoadModel {
-    /// Path the user asked us to open.
+    /// The path that was attempted to be loaded (for context in the error message).
     path: PathBuf,
-    /// Underlying ORT error.
+    /// The underlying error from the ONNX runtime or file I/O.
     #[source]
     source: ort::Error,
   },
 
-  /// Low-level ONNX Runtime error (session creation, inference, tensor
-  /// extraction).
+  /// Errors related to invalid input data, such as mismatched sample rates or chunk sizes.
   #[error(transparent)]
   Ort(#[from] ort::Error),
 
-  /// Tensor shape mismatch while packing model input. Should not occur
-  /// unless the bundled ONNX model was replaced with an incompatible
-  /// one.
-  #[error(transparent)]
-  Shape(#[from] ndarray::ShapeError),
-
-  /// The caller passed an unsupported sample rate.
-  ///
-  /// Silero VAD is trained on 8 kHz and 16 kHz audio only. Higher
-  /// sample rates that are integer multiples of 16 kHz are accepted by
-  /// [`crate::speech_timestamps`] via automatic downsampling, matching
-  /// the upstream Python behaviour; anything else must be resampled by
-  /// the caller (see the optional `resample` feature).
+  /// Errors related to unsupported or incompatible sample rates.
   #[error(
-    "unsupported sample rate: {rate} Hz (Silero VAD only supports 8 kHz, 16 kHz, \
-     or integer multiples of 16 kHz)"
+    "unsupported sample rate: {rate} Hz (Silero VAD only supports 8 kHz and 16 kHz directly)"
   )]
   UnsupportedSampleRate {
-    /// The offending sample rate in hertz.
+    /// The unsupported sample rate in Hz.
     rate: u32,
   },
 
-  /// The internal ONNX session mutex was poisoned because a previous
-  /// inference call panicked. The session is unusable after this.
-  #[error("Silero VAD session is poisoned (a previous inference call panicked)")]
-  Poisoned,
+  /// Errors related to mismatched sample rates between the stream state and the session during inference.
+  #[error(
+    "stream sample rate {actual} Hz does not match expected {expected} Hz for this operation"
+  )]
+  IncompatibleSampleRate {
+    /// The expected sample rate in Hz for the operation (e.g., the session's configured sample rate).
+    expected: u32,
+    /// The actual sample rate in Hz from the stream state that caused the mismatch.
+    actual: u32,
+  },
 
-  /// The ONNX model output had an unexpected shape. Should never
-  /// happen with the bundled model; present so we fail loudly instead
-  /// of producing garbage if a future upstream model breaks compat.
-  #[error("Silero VAD model produced output with unexpected shape: {0:?}")]
-  UnexpectedOutputShape(Vec<usize>),
+  /// Errors related to batch inference containing streams with mixed sample rates.
+  #[error("batch contains mixed sample rates (expected {expected} Hz, found {actual} Hz)")]
+  MixedBatchSampleRate {
+    /// The expected sample rate in Hz for all streams in the batch (e.g., the sample rate of the first stream).
+    expected: u32,
+    /// The actual sample rate in Hz from a stream that does not match the expected sample rate.
+    actual: u32,
+  },
 
-  /// A caller-side invariant was violated (e.g. a chunk with the wrong
-  /// number of samples was passed to [`crate::SileroModel::process`]).
-  #[error("invalid input to Silero VAD: {0}")]
-  InvalidInput(&'static str),
+  /// Errors related to invalid chunk lengths that do not match the expected chunk size for the sample rate.
+  #[error("invalid Silero chunk length: expected {expected} samples, got {actual}")]
+  InvalidChunkLength {
+    /// The expected chunk length in samples for the given sample rate.
+    expected: usize,
+    /// The actual chunk length in samples that was provided.
+    actual: usize,
+  },
+
+  /// Errors related to unexpected output shapes from the model during inference.
+  #[error("Silero model returned unexpected shape for {tensor}: {shape:?}")]
+  UnexpectedOutputShape {
+    /// The name of the tensor that had an unexpected shape.
+    tensor: &'static str,
+    /// The actual shape of the tensor that was returned by the model.
+    shape: Vec<i64>,
+  },
 }
 
-/// Convenient [`Result`] alias for this crate.
-pub type Result<T> = core::result::Result<T, SileroError>;
+/// A convenient alias for results returned by Silero VAD operations, using the custom `Error` type defined above.
+pub type Result<T> = std::result::Result<T, Error>;
