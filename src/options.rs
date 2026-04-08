@@ -127,6 +127,7 @@ impl SpeechOptions {
       end_threshold: None,
       min_speech_duration_ms: 250,
       min_silence_duration_ms: 100,
+      // Matches the upstream silero-vad Python default (0.098 s).
       min_silence_at_max_speech_ms: 98,
       max_speech_duration_ms: None,
       speech_pad_ms: 30,
@@ -209,7 +210,13 @@ impl SpeechOptions {
     ms_to_samples(self.min_silence_at_max_speech_ms, self.sample_rate)
   }
 
-  /// Returns the maximum speech duration before force-splitting, in samples, after accounting for one frame of lookahead and segment padding.
+  /// Returns the maximum speech duration before force-splitting, in samples.
+  ///
+  /// This matches the upstream silero-vad derivation:
+  /// - `- chunk_samples` because the split check runs on the next frame after
+  ///   the limit is exceeded
+  /// - `- 2 * speech_pad_samples` because emitted segments pad both the end of
+  ///   the current segment and the start of the next one
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub fn max_speech_samples(&self) -> Option<u64> {
     self.max_speech_duration_ms.map(|duration_ms| {

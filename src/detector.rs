@@ -73,7 +73,11 @@ pub struct SpeechSegmenter {
   current_sample: u64,
   active_start: Option<u64>,
   tentative_end: Option<u64>,
+  // Start sample of the most recent silence long enough to be a preferred
+  // force-split point.
   max_split_end: Option<u64>,
+  // First speech frame after `max_split_end`; used to resume after a
+  // force-split at that silence boundary.
   next_start: Option<u64>,
 }
 
@@ -145,8 +149,6 @@ impl SpeechSegmenter {
         let silence_samples = frame_start.saturating_sub(tentative_end);
         if silence_samples > self.options.min_silence_at_max_speech_samples() {
           self.max_split_end = Some(tentative_end);
-        }
-        if self.max_split_end.is_some() {
           self.next_start = Some(frame_start);
         }
       }
@@ -269,21 +271,14 @@ impl SpeechSegmenter {
     let raw_end = self.max_split_end.unwrap_or(frame_start);
     let segment = self.build_segment(start, raw_end);
 
-    self.active_start = self
-      .next_start
-      .filter(|next_start| *next_start >= raw_end)
-      .map(|next_start| next_start.saturating_sub(self.options.speech_pad_samples()))
-      .or_else(|| {
-        self
-          .max_split_end
-          .is_none()
-          .then_some(probability >= self.options.start_threshold())
-          .filter(|restart| *restart)
-          .map(|_| frame_start.saturating_sub(self.options.speech_pad_samples()))
-      });
-    self.tentative_end = None;
-    self.max_split_end = None;
-    self.next_start = None;
+    self.active_start = if let Some(next_start) = self.next_start.filter(|next| *next >= raw_end) {
+      Some(next_start.saturating_sub(self.options.speech_pad_samples()))
+    } else if self.max_split_end.is_none() && probability >= self.options.start_threshold() {
+      Some(frame_start.saturating_sub(self.options.speech_pad_samples()))
+    } else {
+      None
+    };
+    self.clear_split_tracking();
 
     segment
   }
@@ -301,6 +296,10 @@ impl SpeechSegmenter {
 
   fn clear_segment_memory(&mut self) {
     self.active_start = None;
+    self.clear_split_tracking();
+  }
+
+  fn clear_split_tracking(&mut self) {
     self.tentative_end = None;
     self.max_split_end = None;
     self.next_start = None;
@@ -446,5 +445,64 @@ mod tests {
     assert_eq!(segments[0].end_sample(), 2_048);
     assert_eq!(segments[1].start_sample(), 4_096);
     assert_eq!(segments[1].end_sample(), 6_144);
+  }
+
+  #[test]
+  fn non_qualifying_silence_does_not_overwrite_next_start() {
+    let config = SpeechOptions::default()
+      .with_min_speech_duration_ms(0)
+      .with_speech_pad_ms(0)
+      .with_min_silence_duration_ms(10_000)
+      .with_min_silence_at_max_speech_ms(64)
+      .with_max_speech_duration_ms(512);
+    let mut segmenter = SpeechSegmenter::new(config);
+
+    let mut probabilities = vec![0.9; 4];
+    probabilities.extend(vec![0.0; 4]);
+    probabilities.extend(vec![0.9; 4]);
+    probabilities.extend(vec![0.0; 1]);
+    probabilities.extend(vec![0.9; 20]);
+
+    let segments = collect(&mut segmenter, &probabilities);
+    assert_eq!(segments[0].end_sample(), 2_048);
+    assert_eq!(segments[1].start_sample(), 4_096);
+  }
+
+  #[test]
+  fn force_split_during_silence_closes_without_restarting() {
+    let config = SpeechOptions::default()
+      .with_min_speech_duration_ms(0)
+      .with_speech_pad_ms(0)
+      .with_min_silence_duration_ms(10_000)
+      .with_min_silence_at_max_speech_ms(64)
+      .with_max_speech_duration_ms(224);
+    let mut segmenter = SpeechSegmenter::new(config);
+
+    let mut probabilities = vec![0.9; 4];
+    probabilities.extend(vec![0.0; 8]);
+
+    let segments = collect(&mut segmenter, &probabilities);
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments[0].start_sample(), 0);
+    assert_eq!(segments[0].end_sample(), 2_048);
+  }
+
+  #[test]
+  fn force_split_applies_speech_pad_to_split_boundaries() {
+    let config = SpeechOptions::default()
+      .with_min_speech_duration_ms(0)
+      .with_speech_pad_ms(32)
+      .with_min_silence_duration_ms(10_000)
+      .with_min_silence_at_max_speech_ms(64)
+      .with_max_speech_duration_ms(512);
+    let mut segmenter = SpeechSegmenter::new(config);
+
+    let mut probabilities = vec![0.9; 4];
+    probabilities.extend(vec![0.0; 4]);
+    probabilities.extend(vec![0.9; 8]);
+
+    let segments = collect(&mut segmenter, &probabilities);
+    assert_eq!(segments[0].end_sample(), 2_560);
+    assert_eq!(segments[1].start_sample(), 3_584);
   }
 }
