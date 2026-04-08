@@ -156,6 +156,17 @@ See [LICENSE-APACHE](LICENSE-APACHE), [LICENSE-MIT](LICENSE-MIT) for details.
 
 Copyright (c) 2026 FinDIT studio authors.
 
+#### Third-party model notice
+
+This crate bundles and redistributes `models/silero_vad.onnx`, a Silero VAD model
+from the upstream Silero project.
+
+The bundled model is third-party content and remains subject to its upstream
+license terms. The upstream Silero model is distributed under the MIT license,
+and redistribution should retain the upstream copyright and permission notice.
+
+Please preserve the upstream Silero attribution/license notice when
+redistributing this package or the bundled model artifact.
 [Github-url]: https://github.com/Findit-AI/silero
 [CI-url]: https://github.com/Findit-AI/silero/actions/workflows/ci.yml
 [codecov-url]: https://app.codecov.io/gh/Findit-AI/silero/

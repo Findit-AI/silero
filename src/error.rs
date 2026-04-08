@@ -26,14 +26,14 @@ pub enum Error {
     rate: u32,
   },
 
-  /// Errors related to mismatched sample rates between the stream state and the session during inference.
+  /// Errors related to a sample-rate mismatch between the current operation/component and the provided stream or input.
   #[error(
     "stream sample rate {actual} Hz does not match expected {expected} Hz for this operation"
   )]
   IncompatibleSampleRate {
-    /// The expected sample rate in Hz for the operation (e.g., the session's configured sample rate).
+    /// The sample rate in Hz required by the current operation or component.
     expected: u32,
-    /// The actual sample rate in Hz from the stream state that caused the mismatch.
+    /// The sample rate in Hz provided by the stream or input that caused the mismatch.
     actual: u32,
   },
 
