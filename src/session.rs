@@ -56,7 +56,8 @@ impl<'a> BatchInput<'a> {
 /// A single `Session` can be reused across many independent
 /// [`StreamState`]s. This is the intended shape for worker-based
 /// runtimes: one session per worker, one stream state per active
-/// audio stream.
+/// audio stream. `Session` is `Send` but not `Sync`, so move it across
+/// threads if needed but do not share one instance concurrently.
 pub struct Session {
   inner: OrtSession,
   input_scratch: Vec<f32>,
@@ -172,12 +173,7 @@ impl Session {
     ])?;
 
     let (output_shape, output_data) = outputs[OUTPUT_NAME].try_extract_tensor::<f32>()?;
-    if output_data.len() != 1 {
-      return Err(Error::UnexpectedOutputShape {
-        tensor: OUTPUT_NAME,
-        shape: output_shape.as_ref().to_vec(),
-      });
-    }
+    validate_shape(OUTPUT_NAME, output_shape.as_ref(), &[1, 1])?;
 
     let (state_shape, state_data) = outputs[STATE_N_NAME].try_extract_tensor::<f32>()?;
     validate_shape(
@@ -185,12 +181,6 @@ impl Session {
       state_shape.as_ref(),
       &[STATE_LAYERS as i64, 1, STATE_HIDDEN_DIM as i64],
     )?;
-    if state_data.len() != STATE_VALUES {
-      return Err(Error::UnexpectedOutputShape {
-        tensor: STATE_N_NAME,
-        shape: state_shape.as_ref().to_vec(),
-      });
-    }
 
     for layer in 0..STATE_LAYERS {
       let start = layer * STATE_HIDDEN_DIM;
@@ -261,12 +251,7 @@ impl Session {
     ])?;
 
     let (output_shape, output_data) = outputs[OUTPUT_NAME].try_extract_tensor::<f32>()?;
-    if output_data.len() != batch_size {
-      return Err(Error::UnexpectedOutputShape {
-        tensor: OUTPUT_NAME,
-        shape: output_shape.as_ref().to_vec(),
-      });
-    }
+    validate_shape(OUTPUT_NAME, output_shape.as_ref(), &[batch_size as i64, 1])?;
 
     let (state_shape, state_data) = outputs[STATE_N_NAME].try_extract_tensor::<f32>()?;
     let expected_state_shape = [
@@ -275,13 +260,6 @@ impl Session {
       STATE_HIDDEN_DIM as i64,
     ];
     validate_shape(STATE_N_NAME, state_shape.as_ref(), &expected_state_shape)?;
-    let expected_state_values = STATE_VALUES * batch_size;
-    if state_data.len() != expected_state_values {
-      return Err(Error::UnexpectedOutputShape {
-        tensor: STATE_N_NAME,
-        shape: state_shape.as_ref().to_vec(),
-      });
-    }
 
     for layer in 0..STATE_LAYERS {
       let layer_offset = layer * batch_size * STATE_HIDDEN_DIM;

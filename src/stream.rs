@@ -13,7 +13,9 @@ pub(crate) const MAX_CHUNK_SAMPLES: usize = SampleRate::Rate16k.chunk_samples();
 /// Each independent audio stream needs its own `StreamState`, even if
 /// multiple streams share the same [`crate::Session`]. This struct
 /// stores only the recurrent state and chunking leftovers; it does not
-/// own an ONNX session.
+/// own an ONNX session. `StreamState` is `Send + Sync`, so it can be
+/// moved or referenced across threads when the surrounding workflow
+/// needs that.
 #[derive(Debug, Clone)]
 pub struct StreamState {
   sample_rate: SampleRate,

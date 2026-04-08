@@ -143,16 +143,17 @@ impl SpeechOptions {
 
   /// Returns the effective end threshold.
   ///
-  /// The returned value is always clamped below the start threshold
-  /// when possible so the segmenter keeps a valid hysteresis window,
-  /// regardless of builder call order.
+  /// If a user-supplied end threshold would break the hysteresis
+  /// window, this falls back to the same derived threshold used by the
+  /// default configuration so behavior stays stable regardless of
+  /// builder call order.
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub fn end_threshold(&self) -> f32 {
     effective_end_threshold(
       self.start_threshold,
       self
         .end_threshold
-        .unwrap_or_else(|| sanitize_probability((self.start_threshold - 0.15).max(0.01))),
+        .unwrap_or_else(|| default_end_threshold(self.start_threshold)),
     )
   }
 
@@ -210,9 +211,9 @@ impl SpeechOptions {
   ///
   /// The stored value is sanitized into the `[0, 1]` range. When the
   /// threshold is later read via [`Self::end_threshold`], it is also
-  /// clamped below the current start threshold so the hysteresis
-  /// contract remains valid even if builder methods are called in a
-  /// different order.
+  /// checked against the current start threshold. Invalid combinations
+  /// fall back to the default derived hysteresis rule even if builder
+  /// methods are called in a different order.
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub fn with_end_threshold(mut self, threshold: f32) -> Self {
     self.end_threshold = Some(sanitize_probability(threshold));
@@ -263,15 +264,20 @@ fn sanitize_probability(value: f32) -> f32 {
 }
 
 #[inline]
+fn default_end_threshold(start_threshold: f32) -> f32 {
+  sanitize_probability((sanitize_probability(start_threshold) - 0.15).max(0.01))
+}
+
+#[inline]
 fn effective_end_threshold(start_threshold: f32, end_threshold: f32) -> f32 {
   let start_threshold = sanitize_probability(start_threshold);
-  let max_end_threshold = if start_threshold > 0.0 {
-    (start_threshold - f32::EPSILON).max(0.0)
-  } else {
-    0.0
-  };
+  let end_threshold = sanitize_probability(end_threshold);
 
-  sanitize_probability(end_threshold).min(max_end_threshold)
+  if end_threshold < start_threshold {
+    end_threshold
+  } else {
+    default_end_threshold(start_threshold)
+  }
 }
 
 #[cfg(test)]
@@ -315,11 +321,12 @@ mod tests {
   }
 
   #[test]
-  fn end_threshold_is_clamped_below_start_threshold_regardless_of_builder_order() {
+  fn end_threshold_falls_back_to_default_gap_when_builder_order_would_invert_hysteresis() {
     let options = SpeechOptions::default()
       .with_start_threshold(0.4)
       .with_end_threshold(0.6);
     assert!(options.end_threshold() < options.start_threshold());
+    assert!((options.end_threshold() - 0.25).abs() < f32::EPSILON);
 
     let reordered = SpeechOptions::default()
       .with_end_threshold(0.6)

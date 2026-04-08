@@ -28,8 +28,7 @@ This crate is designed around the way we actually run VAD in services:
 - one optional segmenter that turns frame probabilities into speech ranges
 
 It intentionally does **not** own queueing, health checks, worker counts, or
-ONNX thread policy. Those belong in a higher-level service crate such as
-`findit-silero-vad`.
+ONNX thread policy. Those belong in a higher-level service crate.
 
 ## Model layout
 
