@@ -106,6 +106,8 @@ pub struct SpeechOptions {
   end_threshold: Option<f32>,
   min_speech_duration_ms: u32,
   min_silence_duration_ms: u32,
+  min_silence_at_max_speech_ms: u32,
+  max_speech_duration_ms: Option<u32>,
   speech_pad_ms: u32,
 }
 
@@ -125,6 +127,8 @@ impl SpeechOptions {
       end_threshold: None,
       min_speech_duration_ms: 250,
       min_silence_duration_ms: 100,
+      min_silence_at_max_speech_ms: 98,
+      max_speech_duration_ms: None,
       speech_pad_ms: 30,
     }
   }
@@ -169,6 +173,18 @@ impl SpeechOptions {
     self.min_silence_duration_ms
   }
 
+  /// Returns the minimum silence duration used as a preferred split point when the maximum speech duration is reached.
+  #[cfg_attr(not(tarpaulin), inline(always))]
+  pub const fn min_silence_at_max_speech_ms(&self) -> u32 {
+    self.min_silence_at_max_speech_ms
+  }
+
+  /// Returns the maximum duration of a speech segment before the segmenter force-splits it.
+  #[cfg_attr(not(tarpaulin), inline(always))]
+  pub const fn max_speech_duration_ms(&self) -> Option<u32> {
+    self.max_speech_duration_ms
+  }
+
   /// Returns the amount of padding to add to the start of detected speech segments, in milliseconds.
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn speech_pad_ms(&self) -> u32 {
@@ -185,6 +201,22 @@ impl SpeechOptions {
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub fn min_silence_samples(&self) -> u64 {
     ms_to_samples(self.min_silence_duration_ms, self.sample_rate)
+  }
+
+  /// Returns the minimum silence duration used as a preferred split point when max speech duration is reached, in samples.
+  #[cfg_attr(not(tarpaulin), inline(always))]
+  pub fn min_silence_at_max_speech_samples(&self) -> u64 {
+    ms_to_samples(self.min_silence_at_max_speech_ms, self.sample_rate)
+  }
+
+  /// Returns the maximum speech duration before force-splitting, in samples, after accounting for one frame of lookahead and segment padding.
+  #[cfg_attr(not(tarpaulin), inline(always))]
+  pub fn max_speech_samples(&self) -> Option<u64> {
+    self.max_speech_duration_ms.map(|duration_ms| {
+      ms_to_samples(duration_ms, self.sample_rate)
+        .saturating_sub(self.sample_rate.chunk_samples() as u64)
+        .saturating_sub(self.speech_pad_samples().saturating_mul(2))
+    })
   }
 
   /// Returns the amount of padding to add to the start of detected speech segments, in samples.
@@ -238,6 +270,27 @@ impl SpeechOptions {
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn with_min_silence_duration_ms(mut self, duration_ms: u32) -> Self {
     self.min_silence_duration_ms = duration_ms;
+    self
+  }
+
+  /// Set the minimum silence duration that can be used as a preferred split point when maximum speech duration is reached.
+  #[cfg_attr(not(tarpaulin), inline(always))]
+  pub const fn with_min_silence_at_max_speech_ms(mut self, duration_ms: u32) -> Self {
+    self.min_silence_at_max_speech_ms = duration_ms;
+    self
+  }
+
+  /// Set the maximum duration of a speech segment before the segmenter force-splits it.
+  #[cfg_attr(not(tarpaulin), inline(always))]
+  pub const fn with_max_speech_duration_ms(mut self, duration_ms: u32) -> Self {
+    self.max_speech_duration_ms = Some(duration_ms);
+    self
+  }
+
+  /// Clear the maximum speech duration, disabling force-splitting by segment length.
+  #[cfg_attr(not(tarpaulin), inline(always))]
+  pub const fn clear_max_speech_duration(mut self) -> Self {
+    self.max_speech_duration_ms = None;
     self
   }
 
@@ -302,6 +355,8 @@ mod tests {
     assert_eq!(config.end_threshold(), 0.35);
     assert_eq!(config.min_speech_duration_ms(), 250);
     assert_eq!(config.min_silence_duration_ms(), 100);
+    assert_eq!(config.min_silence_at_max_speech_ms(), 98);
+    assert_eq!(config.max_speech_duration_ms(), None);
     assert_eq!(config.speech_pad_ms(), 30);
   }
 
@@ -338,5 +393,15 @@ mod tests {
       .with_start_threshold(0.6)
       .with_end_threshold(0.2);
     assert!((valid.end_threshold() - 0.2).abs() < f32::EPSILON);
+  }
+
+  #[test]
+  fn max_speech_duration_converts_to_samples_with_stream_lookahead_and_padding() {
+    let options = SpeechOptions::default()
+      .with_speech_pad_ms(30)
+      .with_max_speech_duration_ms(1_000);
+    assert_eq!(options.max_speech_duration_ms(), Some(1_000));
+    assert_eq!(options.min_silence_at_max_speech_samples(), 1_568);
+    assert_eq!(options.max_speech_samples(), Some(14_528));
   }
 }
