@@ -71,7 +71,10 @@ impl SpeechSegment {
 pub struct SpeechSegmenter {
   options: SpeechOptions,
   current_sample: u64,
+  // Padded start sample used for emitted segments.
   active_start: Option<u64>,
+  // Raw model-frame start sample used for upstream-compatible duration checks.
+  active_raw_start: Option<u64>,
   tentative_end: Option<u64>,
   // Start sample of the most recent silence long enough to be a preferred
   // force-split point.
@@ -89,6 +92,7 @@ impl SpeechSegmenter {
       options,
       current_sample: 0,
       active_start: None,
+      active_raw_start: None,
       tentative_end: None,
       max_split_end: None,
       next_start: None,
@@ -130,6 +134,7 @@ impl SpeechSegmenter {
   pub const fn reset(&mut self) {
     self.current_sample = 0;
     self.active_start = None;
+    self.active_raw_start = None;
     self.tentative_end = None;
     self.max_split_end = None;
     self.next_start = None;
@@ -154,19 +159,20 @@ impl SpeechSegmenter {
       }
       if self.active_start.is_none() {
         self.active_start = Some(frame_start.saturating_sub(self.options.speech_pad_samples()));
+        self.active_raw_start = Some(frame_start);
         return None;
       }
     }
 
     let start = self.active_start?;
+    let raw_start = self.active_raw_start?;
     if let Some(max_speech_samples) = self.options.max_speech_samples() {
-      if frame_start.saturating_sub(start) > max_speech_samples {
+      if frame_start.saturating_sub(raw_start) > max_speech_samples {
         return self.split_at_max_duration(frame_start, probability);
       }
     }
 
     if probability >= self.options.end_threshold() {
-      self.tentative_end = None;
       return None;
     }
 
@@ -180,7 +186,7 @@ impl SpeechSegmenter {
     }
 
     self.clear_segment_memory();
-    self.build_segment(start, silence_start)
+    self.build_segment(start, raw_start, silence_start)
   }
 
   /// Process a buffer of audio samples, emitting speech segments as they are detected.
@@ -226,8 +232,9 @@ impl SpeechSegmenter {
   /// This resets the segmenter so it can be reused for a new stream.
   pub fn finish(&mut self) -> Option<SpeechSegment> {
     let trailing = self.active_start.and_then(|start| {
+      let raw_start = self.active_raw_start?;
       let end = self.current_sample;
-      if end.saturating_sub(start) < self.options.min_speech_samples() {
+      if end.saturating_sub(raw_start) < self.options.min_speech_samples() {
         None
       } else {
         Some(SpeechSegment::new(start, end, self.sample_rate()))
@@ -268,26 +275,31 @@ impl SpeechSegmenter {
 
   fn split_at_max_duration(&mut self, frame_start: u64, probability: f32) -> Option<SpeechSegment> {
     let start = self.active_start?;
+    let raw_start = self.active_raw_start?;
     let raw_end = self.max_split_end.unwrap_or(frame_start);
-    let segment = self.build_segment(start, raw_end);
+    let segment = self.build_segment(start, raw_start, raw_end);
 
-    self.active_start = if let Some(next_start) = self.next_start.filter(|next| *next >= raw_end) {
-      Some(next_start.saturating_sub(self.options.speech_pad_samples()))
+    let next_raw_start = if let Some(next_start) = self.next_start.filter(|next| *next >= raw_end) {
+      self.active_start = Some(next_start.saturating_sub(self.options.speech_pad_samples()));
+      Some(next_start)
     } else if self.max_split_end.is_none() && probability >= self.options.start_threshold() {
-      Some(frame_start.saturating_sub(self.options.speech_pad_samples()))
+      self.active_start = Some(frame_start.saturating_sub(self.options.speech_pad_samples()));
+      Some(frame_start)
     } else {
+      self.active_start = None;
       None
     };
+    self.active_raw_start = next_raw_start;
     self.clear_split_tracking();
 
     segment
   }
 
-  fn build_segment(&self, start: u64, raw_end: u64) -> Option<SpeechSegment> {
+  fn build_segment(&self, start: u64, raw_start: u64, raw_end: u64) -> Option<SpeechSegment> {
     let end_sample = raw_end
       .saturating_add(self.options.speech_pad_samples())
       .min(self.current_sample);
-    if end_sample.saturating_sub(start) < self.options.min_speech_samples() {
+    if raw_end.saturating_sub(raw_start) < self.options.min_speech_samples() {
       None
     } else {
       Some(SpeechSegment::new(start, end_sample, self.sample_rate()))
@@ -296,6 +308,7 @@ impl SpeechSegmenter {
 
   fn clear_segment_memory(&mut self) {
     self.active_start = None;
+    self.active_raw_start = None;
     self.clear_split_tracking();
   }
 
@@ -369,6 +382,38 @@ mod tests {
     let mut segmenter = SpeechSegmenter::new(config);
     let mut probabilities = vec![0.9; frame_count(64, SampleRate::Rate16k)];
     probabilities.extend(vec![0.0; frame_count(160, SampleRate::Rate16k)]);
+    let segments = collect(&mut segmenter, &probabilities);
+    assert!(segments.is_empty());
+  }
+
+  #[test]
+  fn middle_band_frames_do_not_reset_tentative_end() {
+    let config = SpeechOptions::default()
+      .with_min_speech_duration_ms(0)
+      .with_speech_pad_ms(0)
+      .with_min_silence_duration_ms(100);
+    let mut segmenter = SpeechSegmenter::new(config);
+
+    let mut probabilities = vec![0.9; 4];
+    probabilities.extend([0.0, 0.4, 0.0, 0.0]);
+    probabilities.extend(vec![0.9; 4]);
+
+    let segments = collect(&mut segmenter, &probabilities);
+    assert_eq!(segments.len(), 2);
+    assert_eq!(segments[0].start_sample(), 0);
+    assert_eq!(segments[0].end_sample(), 2_048);
+    assert_eq!(segments[1].start_sample(), 4_096);
+  }
+
+  #[test]
+  fn min_speech_duration_is_checked_before_padding() {
+    let config = SpeechOptions::default();
+    let mut segmenter = SpeechSegmenter::new(config);
+
+    let mut probabilities = vec![0.0; 4];
+    probabilities.extend(vec![0.9; 6]);
+    probabilities.extend(vec![0.0; 4]);
+
     let segments = collect(&mut segmenter, &probabilities);
     assert!(segments.is_empty());
   }
