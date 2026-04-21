@@ -74,7 +74,7 @@ fn main() -> Result<(), silero::Error> {
     let mut session = Session::from_memory(model)?;
     let config = SpeechOptions::default();
     let mut stream = StreamState::new(config.sample_rate());
-    let mut segmenter = SpeechSegmenter::new(config);
+    let mut segmenter = SpeechSegmenter::new(config.clone());
     let audio_chunk = vec![0.0_f32; config.sample_rate().chunk_samples()];
 
     segmenter.process_samples(&mut session, &mut stream, &audio_chunk, |segment| {
