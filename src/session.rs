@@ -35,13 +35,13 @@ pub struct BatchInput<'a> {
 
 impl<'a> BatchInput<'a> {
   /// Returns the stream state associated with this batch input, which contains the recurrent memory and context for the stream that produced this chunk.
-  #[inline]
+  #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn state(&mut self) -> &mut StreamState {
     self.stream
   }
 
   /// Returns the chunk of audio samples for this batch input, which should be exactly the expected chunk size for the stream's sample rate.
-  #[inline]
+  #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn chunk(&self) -> &'a [f32] {
     self.chunk
   }
@@ -71,6 +71,7 @@ impl Session {
   /// Create a session from the bundled Silero VAD model with default options.
   #[cfg(feature = "bundled")]
   #[cfg_attr(docsrs, doc(cfg(feature = "bundled")))]
+  #[cfg_attr(not(tarpaulin), inline(always))]
   pub fn bundled() -> Result<Self> {
     Self::bundled_with_options(SessionOptions::default())
   }
@@ -78,16 +79,19 @@ impl Session {
   /// Create a session from the bundled Silero VAD model with custom options.
   #[cfg(feature = "bundled")]
   #[cfg_attr(docsrs, doc(cfg(feature = "bundled")))]
+  #[cfg_attr(not(tarpaulin), inline(always))]
   pub fn bundled_with_options(options: SessionOptions) -> Result<Self> {
     Self::from_memory_with_options(BUNDLED_MODEL, options)
   }
 
   /// Create a session from an ONNX file at the given path with default options.
+  #[cfg_attr(not(tarpaulin), inline(always))]
   pub fn from_file(path: impl AsRef<Path>) -> Result<Self> {
     Self::from_file_with_options(path, SessionOptions::default())
   }
 
   /// Create a session from an ONNX file at the given path with custom options.
+  #[cfg_attr(not(tarpaulin), inline(always))]
   pub fn from_file_with_options(path: impl AsRef<Path>, options: SessionOptions) -> Result<Self> {
     let path = path.as_ref();
     let session = OrtSession::builder()?
@@ -102,11 +106,13 @@ impl Session {
   }
 
   /// Create a session from an ONNX model loaded in memory with default options.
+  #[cfg_attr(not(tarpaulin), inline(always))]
   pub fn from_memory(model_bytes: &[u8]) -> Result<Self> {
     Self::from_memory_with_options(model_bytes, SessionOptions::default())
   }
 
   /// Create a session from an ONNX model loaded in memory with custom options.
+  #[cfg_attr(not(tarpaulin), inline(always))]
   pub fn from_memory_with_options(model_bytes: &[u8], options: SessionOptions) -> Result<Self> {
     let session = OrtSession::builder()?
       .with_optimization_level(options.optimization_level())
@@ -116,7 +122,7 @@ impl Session {
   }
 
   /// Create a session directly from an existing ONNX Runtime session.
-  #[inline]
+  #[cfg_attr(not(tarpaulin), inline(always))]
   pub fn from_ort_session(inner: OrtSession) -> Self {
     Self {
       inner,
@@ -127,6 +133,7 @@ impl Session {
   }
 
   /// Infer one chunk for one stream, returning the speech probability for that chunk.
+  #[cfg_attr(not(tarpaulin), inline(always))]
   pub fn infer_chunk(&mut self, stream: &mut StreamState, chunk: &[f32]) -> Result<f32> {
     Self::infer_chunk_with_scratch(
       &mut self.inner,
@@ -367,7 +374,7 @@ impl Session {
   }
 }
 
-#[inline]
+#[cfg_attr(not(tarpaulin), inline(always))]
 fn validate_shape(tensor: &'static str, actual: &[i64], expected: &[i64]) -> Result<()> {
   if actual == expected {
     Ok(())
