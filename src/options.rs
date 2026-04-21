@@ -401,7 +401,7 @@ impl SpeechOptions {
   /// Set the minimum duration of detected speech segments, in milliseconds.
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn with_min_speech_duration(mut self, duration: Duration) -> Self {
-    self.set_min_silence_duration(duration);
+    self.set_min_speech_duration(duration);
     self
   }
 
@@ -467,28 +467,33 @@ impl SpeechOptions {
     self
   }
 
-  /// Set the minimum duration of detected speech segments, in milliseconds.
+  /// Set the minimum duration of detected speech segments as a `Duration`.
+  /// Sub-second precision is supported according to the precision of `Duration`.
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn set_min_speech_duration(&mut self, duration: Duration) -> &mut Self {
     self.min_speech_duration = duration;
     self
   }
 
-  /// Set the minimum duration of silence required to close a detected speech segment, in milliseconds.
+  /// Set the minimum duration of silence required to close a detected speech segment as a `Duration`.
+  /// Sub-second precision is supported according to the precision of `Duration`.
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn set_min_silence_duration(&mut self, duration: Duration) -> &mut Self {
     self.min_silence_duration = duration;
     self
   }
 
-  /// Set the minimum silence duration that can be used as a preferred split point when maximum speech duration is reached.
+  /// Set the minimum silence duration, as a `Duration`, that can be used as a preferred split point
+  /// when maximum speech duration is reached. Sub-second precision is supported according to the
+  /// precision of `Duration`.
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn set_min_silence_at_max_speech(&mut self, duration: Duration) -> &mut Self {
     self.min_silence_at_max_speech = duration;
     self
   }
 
-  /// Set the maximum duration of a speech segment before the segmenter force-splits it.
+  /// Set the maximum duration of a speech segment, as a `Duration`, before the segmenter
+  /// force-splits it. Sub-second precision is supported according to the precision of `Duration`.
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn set_max_speech_duration(&mut self, duration: Duration) -> &mut Self {
     self.max_speech_duration = Some(duration);
@@ -505,7 +510,13 @@ impl SpeechOptions {
 
 #[inline]
 pub(crate) const fn ms_to_samples(duration: Duration, sample_rate: SampleRate) -> u64 {
-  ((duration.as_millis() * (sample_rate.hz() as u128)) / 1_000) as u64
+  let samples = (duration.as_millis() * (sample_rate.hz() as u128)) / 1_000;
+
+  if samples > u64::MAX as u128 {
+    u64::MAX
+  } else {
+    samples as u64
+  }
 }
 
 #[inline]
