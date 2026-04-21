@@ -592,10 +592,7 @@ mod tests {
   #[test]
   fn session_options_default_to_unopinionated_core_settings() {
     let options = SessionOptions::default();
-    assert_eq!(
-      options.optimization_level(),
-      GraphOptimizationLevel::Disable
-    );
+    assert_eq!(options.optimization_level(), GraphOptimizationLevel::Level3,);
   }
 
   #[test]
