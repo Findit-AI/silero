@@ -9,7 +9,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   let mut session = Session::from_memory(MODEL_BYTES)?;
   let config = SpeechOptions::default();
   let mut stream = StreamState::new(config.sample_rate());
-  let mut segmenter = SpeechSegmenter::new(config);
+  let mut segmenter = SpeechSegmenter::new(config.clone());
 
   let synthetic_audio = vec![0.0_f32; config.sample_rate().chunk_samples() * 8];
   segmenter.process_samples(&mut session, &mut stream, &synthetic_audio, |segment| {

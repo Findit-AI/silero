@@ -14,7 +14,7 @@ pub struct SpeechSegment {
 
 impl SpeechSegment {
   /// Create a new speech segment with the given start and end samples and sample rate.
-  #[inline]
+  #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn new(start_sample: u64, end_sample: u64, sample_rate: SampleRate) -> Self {
     Self {
       start_sample,
@@ -24,37 +24,37 @@ impl SpeechSegment {
   }
 
   /// Returns the start sample of this speech segment.
-  #[inline]
+  #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn start_sample(&self) -> u64 {
     self.start_sample
   }
 
   /// Returns the end sample of this speech segment.
-  #[inline]
+  #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn end_sample(&self) -> u64 {
     self.end_sample
   }
 
   /// Returns the sample rate of this speech segment.
-  #[inline]
+  #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn sample_rate(&self) -> SampleRate {
     self.sample_rate
   }
 
   /// Returns the number of samples in this speech segment.
-  #[inline]
+  #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn sample_count(&self) -> u64 {
     self.end_sample.saturating_sub(self.start_sample)
   }
 
   /// Returns the start time of this speech segment in seconds.
-  #[inline]
+  #[cfg_attr(not(tarpaulin), inline(always))]
   pub fn start_seconds(&self) -> f64 {
     self.start_sample as f64 / self.sample_rate.hz() as f64
   }
 
   /// Returns the end time of this speech segment in seconds.
-  #[inline]
+  #[cfg_attr(not(tarpaulin), inline(always))]
   pub fn end_seconds(&self) -> f64 {
     self.end_sample as f64 / self.sample_rate.hz() as f64
   }
@@ -109,10 +109,10 @@ impl SpeechSegmenter {
   ///
   /// Changing sample rate starts a new logical timeline, so any
   /// in-flight segment state is cleared.
-  #[inline]
+  #[cfg_attr(not(tarpaulin), inline(always))]
   pub fn set_sample_rate(&mut self, sample_rate: SampleRate) {
     if self.sample_rate() != sample_rate {
-      self.options = self.options.with_sample_rate(sample_rate);
+      self.options.set_sample_rate(sample_rate);
       self.reset();
     }
   }
@@ -341,6 +341,8 @@ pub fn detect_speech(
 
 #[cfg(test)]
 mod tests {
+  use std::time::Duration;
+
   use crate::{SampleRate, SpeechOptions};
 
   use super::{SpeechSegment, SpeechSegmenter};
@@ -366,7 +368,7 @@ mod tests {
   #[test]
   fn closes_segment_after_confirmed_silence() {
     let config = SpeechOptions::default();
-    let mut segmenter = SpeechSegmenter::new(config);
+    let mut segmenter = SpeechSegmenter::new(config.clone());
     let mut probabilities = vec![0.9; frame_count(320, SampleRate::Rate16k)];
     probabilities.extend(vec![0.0; frame_count(128, SampleRate::Rate16k)]);
 
@@ -379,7 +381,7 @@ mod tests {
   #[test]
   fn drops_short_bursts() {
     let config = SpeechOptions::default();
-    let mut segmenter = SpeechSegmenter::new(config);
+    let mut segmenter = SpeechSegmenter::new(config.clone());
     let mut probabilities = vec![0.9; frame_count(64, SampleRate::Rate16k)];
     probabilities.extend(vec![0.0; frame_count(160, SampleRate::Rate16k)]);
     let segments = collect(&mut segmenter, &probabilities);
@@ -389,9 +391,9 @@ mod tests {
   #[test]
   fn middle_band_frames_do_not_reset_tentative_end() {
     let config = SpeechOptions::default()
-      .with_min_speech_duration_ms(0)
-      .with_speech_pad_ms(0)
-      .with_min_silence_duration_ms(100);
+      .with_min_speech_duration(Duration::ZERO)
+      .with_speech_pad(Duration::ZERO)
+      .with_min_silence_duration(Duration::from_millis(100));
     let mut segmenter = SpeechSegmenter::new(config);
 
     let mut probabilities = vec![0.9; 4];
@@ -457,9 +459,9 @@ mod tests {
   #[test]
   fn force_splits_long_speech_when_max_duration_is_reached() {
     let config = SpeechOptions::default()
-      .with_min_speech_duration_ms(0)
-      .with_speech_pad_ms(0)
-      .with_max_speech_duration_ms(160);
+      .with_min_speech_duration(Duration::ZERO)
+      .with_speech_pad(Duration::ZERO)
+      .with_max_speech_duration(Duration::from_millis(160));
     let mut segmenter = SpeechSegmenter::new(config);
     let probabilities = vec![0.9; 8];
 
@@ -474,11 +476,11 @@ mod tests {
   #[test]
   fn prefers_recorded_silence_when_splitting_long_speech() {
     let config = SpeechOptions::default()
-      .with_min_speech_duration_ms(0)
-      .with_speech_pad_ms(0)
-      .with_min_silence_duration_ms(300)
-      .with_min_silence_at_max_speech_ms(64)
-      .with_max_speech_duration_ms(256);
+      .with_min_speech_duration(Duration::ZERO)
+      .with_speech_pad(Duration::ZERO)
+      .with_min_silence_duration(Duration::from_millis(300))
+      .with_min_silence_at_max_speech(Duration::from_millis(64))
+      .with_max_speech_duration(Duration::from_millis(256));
     let mut segmenter = SpeechSegmenter::new(config);
     let mut probabilities = vec![0.9; 4];
     probabilities.extend(vec![0.0; 4]);
@@ -495,11 +497,11 @@ mod tests {
   #[test]
   fn non_qualifying_silence_does_not_overwrite_next_start() {
     let config = SpeechOptions::default()
-      .with_min_speech_duration_ms(0)
-      .with_speech_pad_ms(0)
-      .with_min_silence_duration_ms(10_000)
-      .with_min_silence_at_max_speech_ms(64)
-      .with_max_speech_duration_ms(512);
+      .with_min_speech_duration(Duration::ZERO)
+      .with_speech_pad(Duration::ZERO)
+      .with_min_silence_duration(Duration::from_millis(10_000))
+      .with_min_silence_at_max_speech(Duration::from_millis(64))
+      .with_max_speech_duration(Duration::from_millis(512));
     let mut segmenter = SpeechSegmenter::new(config);
 
     let mut probabilities = vec![0.9; 4];
@@ -516,11 +518,11 @@ mod tests {
   #[test]
   fn force_split_during_silence_closes_without_restarting() {
     let config = SpeechOptions::default()
-      .with_min_speech_duration_ms(0)
-      .with_speech_pad_ms(0)
-      .with_min_silence_duration_ms(10_000)
-      .with_min_silence_at_max_speech_ms(64)
-      .with_max_speech_duration_ms(224);
+      .with_min_speech_duration(Duration::ZERO)
+      .with_speech_pad(Duration::ZERO)
+      .with_min_silence_duration(Duration::from_millis(10_000))
+      .with_min_silence_at_max_speech(Duration::from_millis(64))
+      .with_max_speech_duration(Duration::from_millis(224));
     let mut segmenter = SpeechSegmenter::new(config);
 
     let mut probabilities = vec![0.9; 4];
@@ -535,11 +537,11 @@ mod tests {
   #[test]
   fn force_split_applies_speech_pad_to_split_boundaries() {
     let config = SpeechOptions::default()
-      .with_min_speech_duration_ms(0)
-      .with_speech_pad_ms(32)
-      .with_min_silence_duration_ms(10_000)
-      .with_min_silence_at_max_speech_ms(64)
-      .with_max_speech_duration_ms(512);
+      .with_min_speech_duration(Duration::ZERO)
+      .with_speech_pad(Duration::from_millis(32))
+      .with_min_silence_duration(Duration::from_millis(10_000))
+      .with_min_silence_at_max_speech(Duration::from_millis(64))
+      .with_max_speech_duration(Duration::from_millis(512));
     let mut segmenter = SpeechSegmenter::new(config);
 
     let mut probabilities = vec![0.9; 4];
