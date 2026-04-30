@@ -1,6 +1,6 @@
 [package]
 name = "silero"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 rust-version = "1.85"
 repository = "https://github.com/Findit-AI/silero"
@@ -28,6 +28,19 @@ include = [
 default = ["bundled"]
 bundled = []
 serde = ["dep:serde", "dep:humantime-serde"]
+
+# ORT execution-provider passthroughs. Off by default; enabling a feature only
+# links the EP into ort-sys — downstream callers must still register the EP at
+# runtime via `Session::builder().with_execution_providers([...])`. The Silero
+# graph is dominated by `If`/`Loop` control flow around `LSTM`, which CoreML
+# cannot take ownership of, so on macOS registration is a no-op and the model
+# stays on CPU regardless. CUDA/DirectML have not been measured here.
+coreml   = ["ort/coreml"]
+directml = ["ort/directml"]
+cuda     = ["ort/cuda"]
+rocm     = ["ort/rocm"]
+tensorrt = ["ort/tensorrt"]
+openvino = ["ort/openvino"]
 
 [dependencies]
 ort = "2.0.0-rc.12"
