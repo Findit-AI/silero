@@ -13,6 +13,13 @@ mod stream;
 pub use detector::{SpeechDetector, SpeechSegment, SpeechSegmenter, detect_speech};
 pub use error::{Error, Result};
 pub use options::{GraphOptimizationLevel, SampleRate, SessionOptions, SpeechOptions};
+
+/// Version string of the `silero` crate (`CARGO_PKG_VERSION`).
+///
+/// Exposed so out-of-tree harnesses (e.g. the parity runner) can record
+/// the exact silero version under test rather than the harness binary's
+/// own version.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[cfg(feature = "bundled")]
 #[cfg_attr(docsrs, doc(cfg(feature = "bundled")))]
 pub use session::BUNDLED_MODEL;
