@@ -176,8 +176,18 @@ impl SpeechSegmenter {
       return None;
     }
 
+    // Silence-counter is evaluated against `frame_start` (the start sample
+    // of the current frame), not `current_sample` (which is already the
+    // *end* of the current frame). This matches upstream Python
+    // `silero-vad`'s `sil_dur_now = cur_sample - temp_end` semantics,
+    // where `cur_sample` is read BEFORE the model consumes the current
+    // window. Without this, the comparator fires one frame early — a
+    // 4-frame (128 ms) silence dip would close a segment at default
+    // `min_silence_duration_ms = 100`, where Python tolerates it and
+    // closes after 5 consecutive low-probability frames. See the parity
+    // harness in `tests/parity/` and the v0.3.0 CHANGELOG entry.
     let silence_start = *self.tentative_end.get_or_insert(frame_start);
-    let silence_samples = self.current_sample.saturating_sub(silence_start);
+    let silence_samples = frame_start.saturating_sub(silence_start);
     if silence_samples > self.options.min_silence_at_max_speech_samples() {
       self.max_split_end = Some(silence_start);
     }
@@ -390,6 +400,18 @@ mod tests {
 
   #[test]
   fn middle_band_frames_do_not_reset_tentative_end() {
+    // Verifies that mid-band probabilities (between the end_threshold and
+    // start_threshold, e.g. `0.4` against the default `0.5` start) do NOT
+    // reset the silence accumulator — they're treated as "not yet
+    // confirmed speech".
+    //
+    // Updated 0.3.0: post the silence-counter off-by-one fix, the segment
+    // closes after FIVE consecutive low-or-mid-band frames at the default
+    // `min_silence_duration_ms = 100` (1600 samples / 512 per frame =
+    // 3.125 → 4 prior frames + the close-firing 5th frame), matching
+    // upstream Python silero-vad. The pre-0.3.0 crate closed after FOUR
+    // frames (one frame too eager). See `tests/parity/README.md` and the
+    // 0.3.0 CHANGELOG entry for the full derivation.
     let config = SpeechOptions::default()
       .with_min_speech_duration(Duration::ZERO)
       .with_speech_pad(Duration::ZERO)
@@ -397,24 +419,44 @@ mod tests {
     let mut segmenter = SpeechSegmenter::new(config);
 
     let mut probabilities = vec![0.9; 4];
-    probabilities.extend([0.0, 0.4, 0.0, 0.0]);
+    // Five low/mid frames so the segment closes via push_probability.
+    // The mid-band 0.4 frame in the middle must NOT reset the silence
+    // accumulator — that's the actual property under test.
+    probabilities.extend([0.0, 0.4, 0.0, 0.0, 0.0]);
     probabilities.extend(vec![0.9; 4]);
 
     let segments = collect(&mut segmenter, &probabilities);
     assert_eq!(segments.len(), 2);
     assert_eq!(segments[0].start_sample(), 0);
     assert_eq!(segments[0].end_sample(), 2_048);
-    assert_eq!(segments[1].start_sample(), 4_096);
+    // Segment two starts on the first speech frame after the closed
+    // silence (4 high + 5 silence = frame index 9, sample 4_608).
+    assert_eq!(segments[1].start_sample(), 4_608);
   }
 
   #[test]
   fn min_speech_duration_is_checked_before_padding() {
+    // A speech burst of 6 frames * 32 ms = 192 ms is shorter than the
+    // default `min_speech_duration_ms = 250`, so the segment that the
+    // trailing silence closes must be dropped — `min_speech` is checked
+    // against the raw speech window (raw_end - raw_start), not against
+    // the padded boundaries.
+    //
+    // Updated 0.3.0: post the silence-counter off-by-one fix, push-based
+    // close requires FIVE consecutive low-probability frames at the
+    // default `min_silence_duration_ms = 100` (was 4 pre-0.3.0). Trailing
+    // silence is extended from 4 to 5 frames so the close still fires
+    // via `push_probability` — otherwise `finish()` would emit the
+    // burst-plus-trailing-silence as a single trailing segment that
+    // satisfies the 250 ms duration check, which is a different (and
+    // correct, but separate) behaviour. See `tests/parity/README.md`
+    // and the 0.3.0 CHANGELOG entry.
     let config = SpeechOptions::default();
     let mut segmenter = SpeechSegmenter::new(config);
 
     let mut probabilities = vec![0.0; 4];
     probabilities.extend(vec![0.9; 6]);
-    probabilities.extend(vec![0.0; 4]);
+    probabilities.extend(vec![0.0; 5]);
 
     let segments = collect(&mut segmenter, &probabilities);
     assert!(segments.is_empty());
@@ -517,12 +559,25 @@ mod tests {
 
   #[test]
   fn force_split_during_silence_closes_without_restarting() {
+    // Updated 0.3.0: max_speech_duration bumped from 224 ms to 256 ms so
+    // the max-speech split fires one frame later, after `max_split_end`
+    // has been recorded by the silence-counter logic. With the
+    // off-by-one fix to that logic, `max_split_end` is now set on the
+    // 4th low-probability frame instead of the 3rd, so the test's
+    // pre-existing 224 ms ceiling would split at sample 3_584 with
+    // `max_split_end == None` (falling back to `frame_start` and
+    // closing at sample 3_584 instead of at the recorded silence
+    // boundary 2_048). Bumping the ceiling preserves the property under
+    // test — that a force-split during silence closes at the silence
+    // boundary, not at the current frame, and does NOT restart a new
+    // segment afterwards. See `tests/parity/README.md` and the 0.3.0
+    // CHANGELOG entry.
     let config = SpeechOptions::default()
       .with_min_speech_duration(Duration::ZERO)
       .with_speech_pad(Duration::ZERO)
       .with_min_silence_duration(Duration::from_millis(10_000))
       .with_min_silence_at_max_speech(Duration::from_millis(64))
-      .with_max_speech_duration(Duration::from_millis(224));
+      .with_max_speech_duration(Duration::from_millis(256));
     let mut segmenter = SpeechSegmenter::new(config);
 
     let mut probabilities = vec![0.9; 4];
@@ -532,6 +587,79 @@ mod tests {
     assert_eq!(segments.len(), 1);
     assert_eq!(segments[0].start_sample(), 0);
     assert_eq!(segments[0].end_sample(), 2_048);
+  }
+
+  #[test]
+  fn four_frame_silence_dip_does_not_close_segment_at_default_min_silence() {
+    // Pinned in 0.3.0 as a regression guard for the silence-counter
+    // off-by-one fix.
+    //
+    // At the default `min_silence_duration_ms = 100` (1600 samples at
+    // 16 kHz) and the default 32 ms / 512-sample frame, upstream Python
+    // `silero-vad` (`get_speech_timestamps`) closes a segment after
+    // FIVE consecutive low-probability frames — `sil_dur_now =
+    // cur_sample - temp_end` is evaluated BEFORE the current frame is
+    // consumed, so the comparator sees `(k-1) * 512` on the k-th
+    // low-prob frame and only crosses the 1600-sample threshold at
+    // k = 5.
+    //
+    // Pre-0.3.0 the silero crate evaluated the same counter AFTER the
+    // current frame was added to `current_sample`, so it saw `k * 512`
+    // and closed at k = 4. A 4-frame (128 ms) silence dip would
+    // therefore split a segment in the crate but be tolerated by Python.
+    //
+    // This test pins the post-fix behaviour: a 4-frame silence dip must
+    // be tolerated. The 30-frame speech runs ensure both halves
+    // individually clear `min_speech_duration_ms = 250` (8 frames),
+    // so neither would be dropped by the min-speech filter if the
+    // segment did split.
+    //
+    // See `tests/parity/README.md` "Off-by-one silence threshold finding"
+    // and the 0.3.0 CHANGELOG entry for the motivation.
+    let config = SpeechOptions::default();
+    let mut segmenter = SpeechSegmenter::new(config.clone());
+
+    let mut probabilities = vec![1.0; 30];
+    probabilities.extend(vec![0.0; 4]);
+    probabilities.extend(vec![1.0; 30]);
+
+    let segments = collect(&mut segmenter, &probabilities);
+    assert_eq!(
+      segments.len(),
+      1,
+      "4-frame silence dip must be tolerated at default min_silence_duration_ms = 100; \
+       got {} segments",
+      segments.len()
+    );
+    // Sanity: the (one) segment must start at 0 (the start-pad
+    // saturates against the timeline's zero) and span the full
+    // 30 + 4 + 30 = 64 frame window — at 512 samples / frame, that
+    // ends at 32_768.
+    assert_eq!(segments[0].start_sample(), 0);
+    assert_eq!(segments[0].end_sample(), 32_768);
+  }
+
+  #[test]
+  fn five_frame_silence_dip_closes_segment_at_default_min_silence() {
+    // Companion to `four_frame_silence_dip_does_not_close_segment_*`.
+    // Pinned in 0.3.0: at the same defaults, FIVE consecutive low-prob
+    // frames must close the segment — matching upstream Python
+    // silero-vad's `sil_dur_now >= 1600` firing on the 5th frame.
+    let config = SpeechOptions::default();
+    let mut segmenter = SpeechSegmenter::new(config);
+
+    let mut probabilities = vec![1.0; 30];
+    probabilities.extend(vec![0.0; 5]);
+    probabilities.extend(vec![1.0; 30]);
+
+    let segments = collect(&mut segmenter, &probabilities);
+    assert_eq!(
+      segments.len(),
+      2,
+      "5-frame silence dip must close the segment at default \
+       min_silence_duration_ms = 100; got {} segments",
+      segments.len()
+    );
   }
 
   #[test]

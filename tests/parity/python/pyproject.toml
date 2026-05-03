@@ -1,0 +1,31 @@
+[project]
+name = "silero-parity-reference"
+version = "0.0.0"
+requires-python = ">=3.10"
+# `silero-vad` is the upstream PyPI package this harness compares the
+# Rust crate against. Pinned to `>=5.1` so we always pull a stable
+# 5.x/6.x — the `get_speech_timestamps` API and parameter set has
+# been stable since 5.x. Bump this exact pin (or tighten to `==`) on
+# release branches if a behaviour change in upstream silero-vad
+# regresses the parity numbers.
+#
+# `torch` is a transitive of `silero-vad` already; we list it
+# explicitly so a one-off install of the parity venv works without
+# relying on solver cascades.
+dependencies = [
+  "silero-vad >= 5.1",
+  "torch >= 2.0",
+  "numpy >= 1.26",
+  # `silero-vad`'s `load_silero_vad(onnx=True)` path uses
+  # onnxruntime — the runner defaults to that backend so both
+  # runners feed identical bytes to ORT. Without this dep, the ONNX
+  # path raises at load time.
+  "onnxruntime >= 1.18",
+]
+
+# Disable setuptools auto-discovery: this project carries Python
+# scripts only — no installable package layout — so an empty
+# `packages` list lets `uv pip install -e .` install just the project
+# metadata + dependencies without erroring on auto-discovery.
+[tool.setuptools]
+packages = []

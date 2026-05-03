@@ -18,3 +18,12 @@
 Cargo.lock
 
 **.claude/
+
+# Parity harness (manual; outputs are per-machine fixtures).
+# `target/` and `Cargo.lock` are already covered by the rules above.
+tests/parity/out/
+tests/parity/python/.venv/
+tests/parity/python/uv.lock
+tests/parity/python/*.egg-info/
+docs/
+

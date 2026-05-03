@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-02
+
+### Changed
+
+- **Behaviour change** — `SpeechSegmenter::push_probability` now closes
+  speech segments when the silence counter matches the upstream Python
+  `silero-vad` package's semantics. Previously the crate's silence
+  counter was evaluated AFTER the current frame's contribution had been
+  added to `current_sample`, while upstream Python evaluates the
+  equivalent `cur_sample - temp_end` BEFORE the current frame is
+  consumed. The crate's counter therefore fired one model frame
+  (32 ms at 16 kHz / 512-sample windows) too early — at the default
+  `min_silence_duration_ms = 100`, the crate closed a segment after 4
+  consecutive low-probability frames where Python tolerates the dip and
+  closes after 5. The same off-by-one applied to the
+  `min_silence_at_max_speech_samples` comparator on the same code path.
+  Discovered by the parity harness in `tests/parity/`.
+
+### Migration
+
+Callers who hand-tuned `min_silence_duration_ms` against the v0.2.x
+response curve may want to subtract ~32 ms from their value to keep the
+same effective behaviour against v0.3.0+. Default callers do not need
+to change anything — defaults still match upstream silero-vad PyPI
+defaults verbatim, and the response curve is now strictly closer to
+upstream than it was in v0.2.x.
+
+### Verified
+
+- `cargo test`
+- `cargo test --no-default-features`
+- `cargo build --release`
+- `tests/parity/run.sh` on the five short dia parity fixtures
+  (`01_dialogue`, `02_pyannote_sample`, `03_dual_speaker`,
+  `04_three_speaker`, `05_four_speaker`): median IoU 1.0000 and
+  segment counts match exactly against upstream Python silero-vad
+  (51/51, 4/4, 14/14, 6/6, 14/14) WITHOUT the previous
+  `--min-silence-ms 132` override.
+
 ## [0.2.0] - 2026-04-21
 
 ### Added
