@@ -22,7 +22,7 @@ use std::{
   fs,
   io::Write,
   path::{Path, PathBuf},
-  sync::Once,
+  sync::OnceLock,
   time::Duration,
 };
 
@@ -33,7 +33,11 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use silero::{SampleRate, Session, SpeechOptions, detect_speech};
 
-const SILERO_CRATE_VERSION: &str = env!("CARGO_PKG_VERSION");
+// Take the version string from the silero crate itself (re-exported as
+// `silero::VERSION`) rather than `env!("CARGO_PKG_VERSION")`, which in
+// this binary resolves to the parity-runner's own version (0.0.0). The
+// JSON output should record the version of the crate under test.
+const SILERO_CRATE_VERSION: &str = silero::VERSION;
 // SHA-256 of the bundled ONNX model bytes. Computed on demand below.
 // Logged so a snapshot rebuild in the silero crate that swaps
 // `models/silero_vad.onnx` cannot silently invalidate the parity
@@ -85,20 +89,17 @@ struct Args {
   max_speech_s: Option<f64>,
 }
 
-/// Idempotent guard for `ffmpeg::init()`. Mirrors the whispery parity
-/// runner's pattern.
+/// Idempotent guard for `ffmpeg::init()`. Persists the init outcome in
+/// a `OnceLock` so a failed first init keeps surfacing on subsequent
+/// calls (the previous `Once`-based version stored the error on the
+/// stack and silently returned `Ok(())` on later calls).
 fn ffmpeg_init() -> Result<()> {
-  static INIT: Once = Once::new();
-  let mut init_err: Option<ffmpeg::Error> = None;
-  INIT.call_once(|| {
-    if let Err(e) = ffmpeg::init() {
-      init_err = Some(e);
-    }
-  });
-  if let Some(e) = init_err {
-    Err(anyhow::anyhow!("ffmpeg::init failed: {e}"))
-  } else {
-    Ok(())
+  // `ffmpeg::Error` is not `Clone`, so store the error as `String` —
+  // we only need the message on subsequent calls.
+  static INIT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
+  match INIT.get_or_init(|| ffmpeg::init().map_err(|e| e.to_string())) {
+    Ok(()) => Ok(()),
+    Err(msg) => Err(anyhow::anyhow!("ffmpeg::init failed: {msg}")),
   }
 }
 
