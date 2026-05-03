@@ -1,0 +1,35 @@
+[workspace]
+
+[package]
+name        = "silero-parity-runner"
+version     = "0.0.0"
+edition     = "2024"
+publish     = false
+description = "Manual parity harness: dump silero (Rust crate) VAD output to JSON for side-by-side comparison with upstream Python silero-vad."
+
+[dependencies]
+# `silero` crate under test. `bundled` ships the ONNX model bytes
+# in the binary so the harness has no external model dependency.
+silero      = { path = "../..", features = ["bundled"] }
+# `ffmpeg-next` mirrors the production audio-loading path that
+# downstream callers (whispery, dia) use, and matches how upstream
+# Python `silero-vad` loads audio (it uses `torchaudio` which calls
+# ffmpeg under the hood, then casts to f32 / 32768.0). Loading via
+# the same backend on both sides keeps the f32 buffer the model
+# sees byte-identical, so any output divergence is the model /
+# segmenter — not the audio decode path.
+#
+# Pinned to `8` because the local toolchain ships system FFmpeg 8.x
+# (Homebrew `ffmpeg 8.1`) which dropped `libavcodec/avfft.h`; the
+# `ffmpeg-next 7.x` series still references that header in its
+# bindgen pass and therefore fails to build against system FFmpeg 8.
+# Same pin whispery's parity harness uses.
+ffmpeg-next = "8"
+serde_json  = "1"
+clap        = { version = "4", features = ["derive"] }
+sha2        = "0.10"
+anyhow      = "1"
+
+[[bin]]
+name = "silero-parity-runner"
+path = "src/main.rs"
