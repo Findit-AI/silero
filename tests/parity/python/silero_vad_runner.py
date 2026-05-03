@@ -201,7 +201,13 @@ def main() -> int:
             "min_silence_duration_ms": args.min_silence_ms,
             "speech_pad_ms": args.speech_pad_ms,
             "min_silence_at_max_speech_ms": args.min_silence_at_max_speech_ms,
-            "max_speech_s": args.max_speech_s,
+            # Effective value (matches what was actually passed to
+            # `get_speech_timestamps`): the float when `--max-speech-s`
+            # was set, otherwise `math.inf`. `json.dumps` emits the
+            # latter as `Infinity`, which Python's `json.loads` round-
+            # trips correctly; use a JSON parser that accepts non-strict
+            # output if you read this field from a different stack.
+            "max_speech_s": kwargs["max_speech_duration_s"],
             "sampling_rate": sample_rate,
             "window_size_samples": 512,
         },
