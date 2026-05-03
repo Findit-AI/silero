@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.3.0] - 2026-05-02
 
+### Added
+
+- `silero::VERSION` — public `&'static str` constant carrying the crate
+  version (`env!("CARGO_PKG_VERSION")`). Exposed so out-of-tree harnesses
+  can record the exact silero version they're exercising rather than
+  their own binary's version.
+- `tests/parity/` — manual parity harness comparing the silero crate's
+  VAD output against upstream Python `silero-vad`. Ships a Rust runner
+  (`silero-parity-runner`), a Python reference runner, an IoU scorer,
+  and a `run.sh` driver. Not part of `cargo test`; invoked manually.
+  See `tests/parity/README.md`.
+
 ### Changed
 
 - **Behaviour change** — `SpeechSegmenter::push_probability` now closes
@@ -33,6 +45,22 @@ same effective behaviour against v0.3.0+. Default callers do not need
 to change anything — defaults still match upstream silero-vad PyPI
 defaults verbatim, and the response curve is now strictly closer to
 upstream than it was in v0.2.x.
+
+### Fixed
+
+- *(parity harness)* `ffmpeg_init` stored its initialisation error in a
+  stack-local that was only set inside the `Once::call_once` closure.
+  After a failed first init, subsequent calls silently returned
+  `Ok(())` because the closure no longer ran. Switched to a static
+  `OnceLock<Result<(), String>>` so the init outcome is captured once
+  and re-surfaced on every subsequent call.
+- *(parity harness)* The Rust runner reported `silero_crate_version`
+  as the parity-runner binary's own version (`0.0.0`) rather than the
+  silero crate version under test. Now sourced from `silero::VERSION`.
+- *(parity harness)* The Python runner emitted `params.max_speech_s`
+  as `null` when `--max-speech-s` was omitted, contradicting the inline
+  comment that said the JSON should record the effective value. Now
+  records the effective value (`Infinity` when not overridden).
 
 ### Verified
 
