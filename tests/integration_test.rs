@@ -1,4 +1,6 @@
-use silero::{BatchInput, SampleRate, Session, SpeechOptions, StreamState, detect_speech};
+use silero::{
+  BatchInput, SampleRate, Session, SpeechOptions, SpeechSegmenter, StreamState, detect_speech,
+};
 
 const MODEL_BYTES: &[u8] = include_bytes!(concat!(
   env!("CARGO_MANIFEST_DIR"),
@@ -108,12 +110,12 @@ fn process_stream_and_flush_cover_partial_tail() {
   let audio = pseudo_audio(SampleRate::Rate16k.chunk_samples() * 3 + 200);
   let mut probabilities = Vec::new();
 
-  let processed = session
-    .process_stream(&mut stream, &audio, |probability| {
-      probabilities.push(probability)
-    })
-    .expect("process stream");
-  assert_eq!(processed, 3);
+  probabilities.extend_from_slice(
+    session
+      .process_stream(&mut stream, &audio)
+      .expect("process stream"),
+  );
+  assert_eq!(probabilities.len(), 3);
   assert!(stream.has_pending());
 
   if let Some(probability) = session.flush_stream(&mut stream).expect("flush stream") {
@@ -135,4 +137,72 @@ fn detect_speech_on_silence_returns_empty() {
   )
   .expect("detect speech");
   assert!(segments.is_empty());
+}
+
+#[test]
+fn finish_stream_clears_active_state_so_a_followup_finish_does_not_re_emit() {
+  // Pin in 0.4.0: `finish_stream` must clear the in-flight segment
+  // tracker after enqueueing the trailing segment so `is_active()`
+  // reflects end-of-stream and a follow-up `finish_stream` (or
+  // `finish`) can't re-emit the same segment. Caught in PR #6
+  // review (Copilot).
+  use std::time::Duration;
+
+  let mut session = test_session();
+  let mut stream = StreamState::new(SampleRate::Rate16k);
+  // Big enough that the trailing audio confirms an open segment.
+  let chunk = SampleRate::Rate16k.chunk_samples();
+  let mut audio = vec![0.0_f32; chunk * 2];
+  audio.extend(pseudo_audio(chunk * 32));
+  let config = SpeechOptions::default()
+    .with_sample_rate(SampleRate::Rate16k)
+    .with_min_speech_duration(Duration::ZERO);
+  let mut segmenter = SpeechSegmenter::new(config);
+
+  // Feed enough samples to keep an active segment open.
+  let _ = segmenter
+    .push_samples(&mut session, &mut stream, &audio)
+    .expect("push samples");
+  // Drain anything queued.
+  while segmenter
+    .push_samples(&mut session, &mut stream, &[])
+    .expect("drain")
+    .is_some()
+  {}
+
+  // First finish_stream: emits trailing if active.
+  let mut emitted_first = 0;
+  if let Some(_seg) = segmenter
+    .finish_stream(&mut session, &mut stream)
+    .expect("finish_stream first call")
+  {
+    emitted_first += 1;
+    while segmenter
+      .push_samples(&mut session, &mut stream, &[])
+      .expect("drain after finish 1")
+      .is_some()
+    {
+      emitted_first += 1;
+    }
+  }
+
+  // After finish_stream, no segment is active and the queue is drained.
+  assert!(
+    !segmenter.is_active(),
+    "is_active() must be false after finish_stream"
+  );
+  assert_eq!(segmenter.pending_segment_count(), 0);
+
+  // A follow-up finish_stream / finish must NOT re-emit a segment.
+  let second = segmenter
+    .finish_stream(&mut session, &mut stream)
+    .expect("finish_stream second call");
+  assert!(
+    second.is_none(),
+    "second finish_stream must not re-emit (was {:?}, first emitted {})",
+    second,
+    emitted_first
+  );
+  let trailing = segmenter.finish();
+  assert!(trailing.is_none(), "follow-up finish() must not re-emit");
 }

@@ -65,6 +65,10 @@ pub struct Session {
   input_scratch: Vec<f32>,
   state_scratch: Vec<f32>,
   tail_scratch: Vec<f32>,
+  /// Per-call scratch for the probabilities emitted by `process_stream`.
+  /// Cleared and re-filled each call; the returned slice borrows from
+  /// this buffer.
+  prob_scratch: Vec<f32>,
 }
 
 impl Session {
@@ -129,6 +133,7 @@ impl Session {
       input_scratch: Vec::new(),
       state_scratch: Vec::new(),
       tail_scratch: Vec::with_capacity(MAX_CHUNK_SAMPLES),
+      prob_scratch: Vec::new(),
     }
   }
 
@@ -292,51 +297,127 @@ impl Session {
     Ok(output_data.to_vec())
   }
 
-  /// Feed arbitrarily-sized PCM into one stream and emit one
-  /// probability per full Silero frame.
-  pub fn process_stream<F>(
-    &mut self,
+  /// Probabilities recorded by the most recent successful
+  /// [`Self::process_stream`] call.
+  ///
+  /// Identical to the slice that call returned. On the error path,
+  /// `process_stream` rolls back: `StreamState` is restored to its
+  /// pre-call snapshot and `prob_scratch` is cleared, so this
+  /// accessor returns an empty slice after a failed call.
+  ///
+  /// [`Self::flush_stream`] clears `prob_scratch` at entry on both
+  /// paths (Ok and Err), so this accessor is also empty after a
+  /// flush call regardless of outcome — flush returns its single
+  /// probability via `Result<Option<f32>>`.
+  ///
+  /// The slice is only valid until the next call on `self` mutates
+  /// `prob_scratch`.
+  #[cfg_attr(not(tarpaulin), inline(always))]
+  pub fn last_probabilities(&self) -> &[f32] {
+    &self.prob_scratch
+  }
+
+  /// Feed arbitrarily-sized PCM into one stream and return the
+  /// probabilities for every full Silero frame consumed by this call.
+  ///
+  /// The returned slice borrows from an internal scratch buffer and is
+  /// only valid until the next call on `self`. Empty `samples` returns
+  /// an empty slice (no inference, no allocation).
+  ///
+  /// # Atomicity
+  ///
+  /// `process_stream` is **all-or-nothing**: if any chunk's inference
+  /// fails the call snapshots `*stream` at entry and restores the
+  /// snapshot before returning, then clears `prob_scratch`. Callers
+  /// can retry the same call with the same `samples` and observe the
+  /// same result, with no risk of `StreamState` and downstream
+  /// segmentation timelines drifting apart on partial failure.
+  pub fn process_stream(&mut self, stream: &mut StreamState, samples: &[f32]) -> Result<&[f32]> {
+    self.prob_scratch.clear();
+
+    // Fast path: if pending + samples can't assemble a full chunk,
+    // no inference will run — the only side effect is the
+    // `append_pending` memcpy at the end, which is infallible. Skip
+    // the StreamState clone so sub-frame pushes (a common shape
+    // under the new push/pop API: feed 100–200 samples at a time
+    // when chunk_samples == 512) don't pay a ~3 KB per-call copy.
+    let chunk_samples = stream.sample_rate().chunk_samples();
+    if stream.pending_len() + samples.len() < chunk_samples {
+      if !samples.is_empty() {
+        stream.append_pending(samples);
+      }
+      return Ok(&self.prob_scratch);
+    }
+
+    let snapshot = stream.clone();
+    match Self::process_stream_inner(
+      &mut self.inner,
+      &mut self.input_scratch,
+      &mut self.state_scratch,
+      &mut self.tail_scratch,
+      &mut self.prob_scratch,
+      stream,
+      samples,
+    ) {
+      Ok(()) => Ok(&self.prob_scratch),
+      Err(error) => {
+        *stream = snapshot;
+        self.prob_scratch.clear();
+        Err(error)
+      }
+    }
+  }
+
+  fn process_stream_inner(
+    inner: &mut OrtSession,
+    input_scratch: &mut Vec<f32>,
+    state_scratch: &mut Vec<f32>,
+    tail_scratch: &mut Vec<f32>,
+    prob_scratch: &mut Vec<f32>,
     stream: &mut StreamState,
     samples: &[f32],
-    mut on_probability: F,
-  ) -> Result<usize>
-  where
-    F: FnMut(f32),
-  {
+  ) -> Result<()> {
     let chunk_samples = stream.sample_rate().chunk_samples();
     let mut offset = 0usize;
-    let mut frames = 0usize;
 
     if stream.has_pending() {
       let needed = chunk_samples - stream.pending_len();
       if samples.len() < needed {
         stream.append_pending(samples);
-        return Ok(0);
+        return Ok(());
       }
 
       let pending_len = stream.pending_len();
-      self.tail_scratch.clear();
-      self.tail_scratch.resize(chunk_samples, 0.0);
-      self.tail_scratch[..pending_len].copy_from_slice(stream.pending());
-      self.tail_scratch[pending_len..chunk_samples].copy_from_slice(&samples[..needed]);
-      stream.clear_pending();
-
+      tail_scratch.clear();
+      tail_scratch.resize(chunk_samples, 0.0);
+      tail_scratch[..pending_len].copy_from_slice(stream.pending());
+      tail_scratch[pending_len..chunk_samples].copy_from_slice(&samples[..needed]);
+      // Note: `stream.pending` is still populated here. The outer
+      // `process_stream` snapshots the whole `StreamState` and rolls
+      // back on error, so we don't bother clear-and-restore for the
+      // pending field specifically. On success we clear after the
+      // inference commits so the steady-state behavior is unchanged.
       let probability = Self::infer_chunk_with_scratch(
-        &mut self.inner,
-        &mut self.input_scratch,
-        &mut self.state_scratch,
+        inner,
+        input_scratch,
+        state_scratch,
         stream,
-        &self.tail_scratch[..chunk_samples],
+        &tail_scratch[..chunk_samples],
       )?;
-      on_probability(probability);
-      frames += 1;
+      stream.clear_pending();
+      prob_scratch.push(probability);
       offset = needed;
     }
 
     while offset + chunk_samples <= samples.len() {
-      let probability = self.infer_chunk(stream, &samples[offset..offset + chunk_samples])?;
-      on_probability(probability);
-      frames += 1;
+      let probability = Self::infer_chunk_with_scratch(
+        inner,
+        input_scratch,
+        state_scratch,
+        stream,
+        &samples[offset..offset + chunk_samples],
+      )?;
+      prob_scratch.push(probability);
       offset += chunk_samples;
     }
 
@@ -344,33 +425,52 @@ impl Session {
       stream.append_pending(&samples[offset..]);
     }
 
-    Ok(frames)
+    Ok(())
   }
 
   /// Zero-pad and process any remaining partial frame for a stream.
   ///
   /// This is mainly useful at end-of-stream. If there are no pending
   /// samples, `Ok(None)` is returned.
+  ///
+  /// # Atomicity
+  ///
+  /// Like [`Self::process_stream`], this is **all-or-nothing**: a
+  /// snapshot of `*stream` is taken at entry and restored on
+  /// inference failure so the pending PCM tail is preserved and a
+  /// retry sees the same input.
   pub fn flush_stream(&mut self, stream: &mut StreamState) -> Result<Option<f32>> {
+    // Clear at entry so `last_probabilities()` never returns stale
+    // probabilities from a prior `process_stream` after a flush call —
+    // matches the atomicity contract advertised in the changelog.
+    self.prob_scratch.clear();
     if !stream.has_pending() {
       return Ok(None);
     }
+    let snapshot = stream.clone();
 
     let chunk_samples = stream.sample_rate().chunk_samples();
     self.tail_scratch.clear();
     self.tail_scratch.resize(chunk_samples, 0.0);
     let pending_len = stream.pending_len();
     self.tail_scratch[..pending_len].copy_from_slice(stream.pending());
-    stream.clear_pending();
 
-    Self::infer_chunk_with_scratch(
+    match Self::infer_chunk_with_scratch(
       &mut self.inner,
       &mut self.input_scratch,
       &mut self.state_scratch,
       stream,
       &self.tail_scratch[..chunk_samples],
-    )
-    .map(Some)
+    ) {
+      Ok(probability) => {
+        stream.clear_pending();
+        Ok(Some(probability))
+      }
+      Err(error) => {
+        *stream = snapshot;
+        Err(error)
+      }
+    }
   }
 }
 
@@ -408,5 +508,119 @@ mod tests {
     assert!(validate_shape("stateN", &[2, 3, 128], &[2, 3, 128]).is_ok());
     assert!(validate_shape("stateN", &[3, 2, 128], &[2, 3, 128]).is_err());
     assert!(validate_shape("stateN", &[2, 384], &[2, 3, 128]).is_err());
+  }
+
+  #[test]
+  fn last_probabilities_matches_process_stream_ok_slice() {
+    // Pin the Session::last_probabilities accessor: on Ok, it must
+    // mirror the slice that process_stream returned. This is the
+    // visible half of the partial-failure contract — the Err-path
+    // half can't be unit-tested without injecting an ort failure,
+    // but the accessor's basic shape is regression-guarded here.
+    let mut session = Session::from_memory(include_bytes!(concat!(
+      env!("CARGO_MANIFEST_DIR"),
+      "/models/silero_vad.onnx"
+    )))
+    .expect("bundled model should load");
+    let mut stream = StreamState::new(SampleRate::Rate16k);
+    let chunk = SampleRate::Rate16k.chunk_samples();
+    let audio = vec![0.0f32; chunk * 4];
+    let returned: Vec<f32> = session
+      .process_stream(&mut stream, &audio)
+      .expect("process_stream")
+      .to_vec();
+    assert_eq!(returned.len(), 4);
+    assert_eq!(session.last_probabilities(), &returned[..]);
+
+    // A subsequent process_stream call with empty samples does not
+    // mutate prob_scratch's content for the prior call's slice
+    // beyond clearing it.
+    let _ = session
+      .process_stream(&mut stream, &[])
+      .expect("process_stream empty");
+    assert!(
+      session.last_probabilities().is_empty(),
+      "process_stream(&[]) must clear prob_scratch"
+    );
+  }
+
+  #[test]
+  fn flush_stream_clears_last_probabilities_on_both_paths() {
+    // Pin in 0.4.0 (codex round-5 finding): a successful
+    // process_stream followed by ANY flush_stream call must leave
+    // last_probabilities() empty so retry-on-error logic doesn't
+    // observe stale probabilities from the prior process_stream
+    // call. Verified here for the no-pending early-return path
+    // (the inference path is exercised by `flush_stream_without_
+    // pending_is_noop` plus the partial-tail integration test).
+    let mut session = Session::from_memory(include_bytes!(concat!(
+      env!("CARGO_MANIFEST_DIR"),
+      "/models/silero_vad.onnx"
+    )))
+    .expect("bundled model should load");
+    let mut stream = StreamState::new(SampleRate::Rate16k);
+    let chunk = SampleRate::Rate16k.chunk_samples();
+    let audio = vec![0.0f32; chunk * 3];
+
+    // Prime prob_scratch with three probabilities.
+    let _ = session
+      .process_stream(&mut stream, &audio)
+      .expect("process_stream");
+    assert_eq!(session.last_probabilities().len(), 3);
+
+    // No pending → Ok(None) early return must STILL clear scratch.
+    assert!(session.flush_stream(&mut stream).expect("flush").is_none());
+    assert!(
+      session.last_probabilities().is_empty(),
+      "flush_stream must clear prob_scratch even on the no-pending early return"
+    );
+  }
+
+  #[test]
+  fn process_stream_subframe_pushes_extend_pending_without_inference() {
+    // Pin the fast-path: when pending + samples can't assemble a
+    // full chunk, `process_stream` returns Ok(empty slice) and just
+    // appends to `StreamState`'s pending tail. No inference runs, no
+    // StreamState clone is taken — the latter we can't observe
+    // directly but we can pin the visible side effects (no probs
+    // produced; pending grows by exactly samples.len()).
+    let mut session = Session::from_memory(include_bytes!(concat!(
+      env!("CARGO_MANIFEST_DIR"),
+      "/models/silero_vad.onnx"
+    )))
+    .expect("bundled model should load");
+    let mut stream = StreamState::new(SampleRate::Rate16k);
+    let chunk = SampleRate::Rate16k.chunk_samples();
+    assert!(chunk >= 32, "test assumes chunk_samples >= 32");
+
+    // Three sub-frame pushes that each leave pending < chunk.
+    let probs1 = session
+      .process_stream(&mut stream, &vec![0.0f32; 100])
+      .expect("push 1");
+    assert!(probs1.is_empty());
+    assert_eq!(stream.pending_len(), 100);
+
+    let probs2 = session
+      .process_stream(&mut stream, &vec![0.0f32; 200])
+      .expect("push 2");
+    assert!(probs2.is_empty());
+    assert_eq!(stream.pending_len(), 300);
+
+    // Empty push under the fast-path is also a no-op besides the
+    // prob_scratch clear.
+    let probs3 = session
+      .process_stream(&mut stream, &[])
+      .expect("push empty");
+    assert!(probs3.is_empty());
+    assert_eq!(stream.pending_len(), 300);
+
+    // Now push enough to cross the chunk boundary — inference runs
+    // exactly once, leaving (300 + needed) - chunk samples pending.
+    let bridge = vec![0.0f32; chunk];
+    let probs4 = session
+      .process_stream(&mut stream, &bridge)
+      .expect("push bridging");
+    assert_eq!(probs4.len(), 1, "exactly one chunk's worth of inference");
+    assert_eq!(stream.pending_len(), 300 + chunk - chunk);
   }
 }
