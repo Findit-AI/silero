@@ -77,21 +77,26 @@ fn main() -> Result<(), silero::Error> {
     let mut segmenter = SpeechSegmenter::new(config.clone());
     let audio_chunk = vec![0.0_f32; config.sample_rate().chunk_samples()];
 
-    segmenter.process_samples(&mut session, &mut stream, &audio_chunk, |segment| {
+    let print = |segment: silero::SpeechSegment| {
         println!(
             "speech {:.2}s -> {:.2}s",
             segment.start_seconds(),
             segment.end_seconds()
         );
-    })?;
+    };
 
-    segmenter.finish_stream(&mut session, &mut stream, |segment| {
-        println!(
-            "speech {:.2}s -> {:.2}s",
-            segment.start_seconds(),
-            segment.end_seconds()
-        );
-    })?;
+    if let Some(segment) = segmenter.push_samples(&mut session, &mut stream, &audio_chunk)? {
+        print(segment);
+        while let Some(more) = segmenter.push_samples(&mut session, &mut stream, &[])? {
+            print(more);
+        }
+    }
+    if let Some(segment) = segmenter.finish_stream(&mut session, &mut stream)? {
+        print(segment);
+        while let Some(more) = segmenter.push_samples(&mut session, &mut stream, &[])? {
+            print(more);
+        }
+    }
 
     Ok(())
 }

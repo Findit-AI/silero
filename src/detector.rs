@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::{
   Result, Session, StreamState,
   error::Error,
@@ -82,12 +84,16 @@ pub struct SpeechSegmenter {
   // First speech frame after `max_split_end`; used to resume after a
   // force-split at that silence boundary.
   next_start: Option<u64>,
+  // Queue of segments closed by recent push_samples / finish_stream calls
+  // that have not yet been popped by the caller. Drained one segment at
+  // a time via `push_samples(&[])`.
+  pending_segments: VecDeque<SpeechSegment>,
 }
 
 impl SpeechSegmenter {
   /// Create a new `SpeechSegmenter` with the given options.
   #[cfg_attr(not(tarpaulin), inline(always))]
-  pub const fn new(options: SpeechOptions) -> Self {
+  pub fn new(options: SpeechOptions) -> Self {
     Self {
       options,
       current_sample: 0,
@@ -96,6 +102,7 @@ impl SpeechSegmenter {
       tentative_end: None,
       max_split_end: None,
       next_start: None,
+      pending_segments: VecDeque::new(),
     }
   }
 
@@ -129,15 +136,34 @@ impl SpeechSegmenter {
     self.active_start.is_some()
   }
 
-  /// Reset the segmenter state, clearing any ongoing segments and pending samples.
+  /// Reset the segmenter's internal state: the in-flight segment
+  /// tracker (active start, tentative end, force-split bookkeeping),
+  /// the running sample counter, and any segments queued for
+  /// `push_samples(&[])` drain.
+  ///
+  /// This does not touch the `StreamState` buffer of un-chunked PCM —
+  /// that lives on the stream, not the segmenter — so callers that
+  /// reuse a stream for a new logical recording should also call
+  /// [`crate::StreamState::reset`] (or construct a fresh `StreamState`).
   #[cfg_attr(not(tarpaulin), inline(always))]
-  pub const fn reset(&mut self) {
+  pub fn reset(&mut self) {
     self.current_sample = 0;
     self.active_start = None;
     self.active_raw_start = None;
     self.tentative_end = None;
     self.max_split_end = None;
     self.next_start = None;
+    self.pending_segments.clear();
+  }
+
+  /// Number of segments currently queued for drain via `push_samples(&[])`.
+  ///
+  /// Always `0` after a `push_samples` or `finish_stream` call that
+  /// returned `Ok(None)`. Useful for tests that want to assert the
+  /// caller has drained everything before tearing down a stream.
+  #[cfg_attr(not(tarpaulin), inline(always))]
+  pub fn pending_segment_count(&self) -> usize {
+    self.pending_segments.len()
   }
 
   /// Consume one probability for one Silero frame.
@@ -166,10 +192,10 @@ impl SpeechSegmenter {
 
     let start = self.active_start?;
     let raw_start = self.active_raw_start?;
-    if let Some(max_speech_samples) = self.options.max_speech_samples() {
-      if frame_start.saturating_sub(raw_start) > max_speech_samples {
-        return self.split_at_max_duration(frame_start, probability);
-      }
+    if let Some(max_speech_samples) = self.options.max_speech_samples()
+      && frame_start.saturating_sub(raw_start) > max_speech_samples
+    {
+      return self.split_at_max_duration(frame_start, probability);
     }
 
     if probability >= self.options.end_threshold() {
@@ -199,77 +225,135 @@ impl SpeechSegmenter {
     self.build_segment(start, raw_start, silence_start)
   }
 
-  /// Process a buffer of audio samples, emitting speech segments as they are detected.
-  pub fn process_samples<F>(
+  /// Feed PCM samples into one stream and return the next available
+  /// closed segment.
+  ///
+  /// Returns `Ok(Some(segment))` when a segment is ready, `Ok(None)`
+  /// when none is available yet. Pass an empty slice (`&[]`) to drain
+  /// any segments still buffered from a previous call without feeding
+  /// new audio — useful when a single push closed more than one
+  /// segment (rare but possible at force-split).
+  pub fn push_samples(
     &mut self,
     session: &mut Session,
     stream: &mut StreamState,
     samples: &[f32],
-    mut emit: F,
-  ) -> Result<usize>
-  where
-    F: FnMut(SpeechSegment),
-  {
+  ) -> Result<Option<SpeechSegment>> {
     self.ensure_sample_rate(stream.sample_rate())?;
-    session.process_stream(stream, samples, |probability| {
-      if let Some(segment) = self.push_probability(probability) {
-        emit(segment);
-      }
-    })
-  }
-
-  /// Flush any remaining pending samples for a stream, emitting a final speech segment if the flushed tail confirms the end of an active segment.
-  pub fn flush_stream<F>(
-    &mut self,
-    session: &mut Session,
-    stream: &mut StreamState,
-    mut emit: F,
-  ) -> Result<()>
-  where
-    F: FnMut(SpeechSegment),
-  {
-    self.ensure_sample_rate(stream.sample_rate())?;
-    if let Some(probability) = session.flush_stream(stream)? {
-      if let Some(segment) = self.push_probability(probability) {
-        emit(segment);
+    if !samples.is_empty() {
+      // `Session::process_stream` is atomic: on inference failure it
+      // restores `StreamState` to its pre-call snapshot and clears
+      // its scratch. So the segmenter only needs to advance when the
+      // call succeeds — partial-progress reconciliation is the
+      // session's responsibility.
+      let probabilities = session.process_stream(stream, samples)?;
+      for &probability in probabilities {
+        if let Some(segment) = self.push_probability(probability) {
+          self.pending_segments.push_back(segment);
+        }
       }
     }
-    Ok(())
+    Ok(self.pending_segments.pop_front())
   }
 
-  /// Finish the current stream and emit any trailing open segment.
+  /// Zero-pad and process any remaining partial frame for a stream.
   ///
-  /// This resets the segmenter so it can be reused for a new stream.
-  pub fn finish(&mut self) -> Option<SpeechSegment> {
-    let trailing = self.active_start.and_then(|start| {
-      let raw_start = self.active_raw_start?;
-      let end = self.current_sample;
-      if end.saturating_sub(raw_start) < self.options.min_speech_samples() {
-        None
-      } else {
-        Some(SpeechSegment::new(start, end, self.sample_rate()))
-      }
-    });
-    self.reset();
-    trailing
-  }
-
-  /// Convenience for end-of-stream handling: flush the model tail and
-  /// then close any trailing open segment.
-  pub fn finish_stream<F>(
+  /// If the flushed frame confirms the end of an active segment, the
+  /// resulting segment is appended to the pending-segment queue.
+  /// This call then pops and returns the **front** of that queue —
+  /// so if earlier `push_samples` calls queued segments that the
+  /// caller hasn't drained yet, those come out first, in order,
+  /// before the flush-produced segment.
+  ///
+  /// Returns `Ok(None)` only when the queue is empty after the flush.
+  /// Drain the rest of the queue with `push_samples(&[])` when this
+  /// returns a segment, in case the flush plus prior pushes left
+  /// more than one waiting.
+  pub fn flush_stream(
     &mut self,
     session: &mut Session,
     stream: &mut StreamState,
-    mut emit: F,
-  ) -> Result<()>
-  where
-    F: FnMut(SpeechSegment),
-  {
-    self.flush_stream(session, stream, &mut emit)?;
-    if let Some(segment) = self.finish() {
-      emit(segment);
+  ) -> Result<Option<SpeechSegment>> {
+    self.ensure_sample_rate(stream.sample_rate())?;
+    if let Some(probability) = session.flush_stream(stream)?
+      && let Some(segment) = self.push_probability(probability)
+    {
+      self.pending_segments.push_back(segment);
     }
-    Ok(())
+    Ok(self.pending_segments.pop_front())
+  }
+
+  /// Compute the trailing open segment (if any) without resetting.
+  /// Helper for `finish` and `finish_stream`.
+  fn take_trailing(&self) -> Option<SpeechSegment> {
+    let start = self.active_start?;
+    let raw_start = self.active_raw_start?;
+    let end = self.current_sample;
+    if end.saturating_sub(raw_start) < self.options.min_speech_samples() {
+      None
+    } else {
+      Some(SpeechSegment::new(start, end, self.sample_rate()))
+    }
+  }
+
+  /// Finish the current stream and return the next available segment.
+  ///
+  /// Enqueues the trailing open segment (if any) onto the
+  /// `pending_segments` queue, then pops and returns the head of
+  /// that queue. This preserves the order of any segments that an
+  /// earlier `push_samples` queued but the caller hasn't drained yet
+  /// (the rare force-split case): they come out before the trailing
+  /// segment.
+  ///
+  /// The in-flight segment tracker is cleared so `is_active()` is
+  /// `false` afterwards and a follow-up `finish()` / `finish_stream()`
+  /// can't re-emit the same trailing segment. The pending-segment
+  /// queue is left intact so subsequent `push_samples(&[])` calls
+  /// drain the rest; call [`Self::reset`] explicitly when starting a
+  /// new stream.
+  ///
+  /// This does **not** flush the model tail — use
+  /// [`Self::finish_stream`] for the combined "flush model tail +
+  /// close trailing segment" end-of-stream operation.
+  pub fn finish(&mut self) -> Option<SpeechSegment> {
+    if let Some(trailing) = self.take_trailing() {
+      self.pending_segments.push_back(trailing);
+    }
+    self.clear_segment_memory();
+    self.pending_segments.pop_front()
+  }
+
+  /// Convenience for end-of-stream handling: flush the model tail,
+  /// close any trailing open segment, and return the next available
+  /// segment from the resulting queue.
+  ///
+  /// Drain additional buffered segments with `push_samples(&[])` after
+  /// this call, in case flush + close produced more than one segment.
+  /// The in-flight segment tracker is cleared once the trailing
+  /// segment has been enqueued so `is_active()` returns `false` and a
+  /// follow-up `finish()` / `finish_stream()` can't re-emit the same
+  /// segment. The pending-segment queue is left intact so the drain
+  /// works; call [`Self::reset`] explicitly when starting a new
+  /// stream.
+  pub fn finish_stream(
+    &mut self,
+    session: &mut Session,
+    stream: &mut StreamState,
+  ) -> Result<Option<SpeechSegment>> {
+    self.ensure_sample_rate(stream.sample_rate())?;
+    if let Some(probability) = session.flush_stream(stream)?
+      && let Some(segment) = self.push_probability(probability)
+    {
+      self.pending_segments.push_back(segment);
+    }
+    if let Some(trailing) = self.take_trailing() {
+      self.pending_segments.push_back(trailing);
+    }
+    // Clear the in-flight segment tracker so `is_active()` reflects
+    // end-of-stream and a follow-up finish call can't re-emit the
+    // trailing segment. Keep `pending_segments` intact for drain.
+    self.clear_segment_memory();
+    Ok(self.pending_segments.pop_front())
   }
 
   fn ensure_sample_rate(&self, sample_rate: SampleRate) -> Result<()> {
@@ -342,10 +426,18 @@ pub fn detect_speech(
   let mut stream = StreamState::new(config.sample_rate());
   let mut segmenter = SpeechSegmenter::new(config);
   let mut segments = Vec::new();
-  segmenter.process_samples(session, &mut stream, samples, |segment| {
-    segments.push(segment)
-  })?;
-  segmenter.finish_stream(session, &mut stream, |segment| segments.push(segment))?;
+  if let Some(segment) = segmenter.push_samples(session, &mut stream, samples)? {
+    segments.push(segment);
+    while let Some(more) = segmenter.push_samples(session, &mut stream, &[])? {
+      segments.push(more);
+    }
+  }
+  if let Some(segment) = segmenter.finish_stream(session, &mut stream)? {
+    segments.push(segment);
+    while let Some(more) = segmenter.push_samples(session, &mut stream, &[])? {
+      segments.push(more);
+    }
+  }
   Ok(segments)
 }
 
@@ -679,5 +771,44 @@ mod tests {
     let segments = collect(&mut segmenter, &probabilities);
     assert_eq!(segments[0].end_sample(), 2_560);
     assert_eq!(segments[1].start_sample(), 3_584);
+  }
+
+  #[test]
+  fn finish_preserves_undrained_queued_segments() {
+    // Pin in 0.4.0 (codex round-3 finding): `push_samples` can queue
+    // multiple segments per call (rare but possible — a long buffer
+    // with a force-split + close in one push). The previous `finish()`
+    // implementation called `reset()`, which cleared the queue and
+    // silently lost any segments the caller hadn't popped yet.
+    //
+    // The new contract: `finish()` enqueues the trailing segment (if
+    // any) at the back of the queue and pops the front, so undrained
+    // segments come out in order before the trailing one.
+    let config = SpeechOptions::default();
+    let mut segmenter = SpeechSegmenter::new(config);
+
+    // Simulate the post-`push_samples` state where two segments
+    // closed in one call but the caller only popped the first: stage
+    // two segments in the queue directly via the (private) field.
+    let queued_a = SpeechSegment::new(0, 1_000, segmenter.sample_rate());
+    let queued_b = SpeechSegment::new(2_000, 3_000, segmenter.sample_rate());
+    segmenter.pending_segments.push_back(queued_a);
+    segmenter.pending_segments.push_back(queued_b);
+
+    // First finish(): must return the head of the queue, NOT silently
+    // drop the rest.
+    assert_eq!(segmenter.finish(), Some(queued_a));
+    assert_eq!(segmenter.pending_segment_count(), 1);
+
+    // Second finish(): must drain the next queued segment.
+    assert_eq!(segmenter.finish(), Some(queued_b));
+    assert_eq!(segmenter.pending_segment_count(), 0);
+
+    // Queue exhausted, no trailing → None.
+    assert_eq!(segmenter.finish(), None);
+
+    // Active state cleared by finish() so a subsequent push could
+    // start a fresh segment cleanly.
+    assert!(!segmenter.is_active());
   }
 }

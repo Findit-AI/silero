@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-05-09
+
+### Changed
+
+- **Breaking** — `rust-version` bumped from `1.85` to `1.88`. The
+  new streaming API uses let-chains, which are stable since 1.88.
+- **Breaking** — replaced the closure-based streaming API with a
+  sans-I/O push/pop pattern that mirrors the
+  [`firered-vad`](https://crates.io/crates/firered-vad) crate.
+  - `Session::process_stream(stream, samples, |prob| …) -> Result<usize>`
+    becomes
+    `Session::process_stream(stream, samples) -> Result<&[f32]>`.
+    The returned slice borrows from an internal scratch buffer and is
+    valid until the next call.
+  - `SpeechSegmenter::process_samples(session, stream, samples, |seg| …)`
+    becomes
+    `SpeechSegmenter::push_samples(session, stream, samples) -> Result<Option<SpeechSegment>>`.
+    Pass `&[]` to drain segments queued by an earlier push (rare, but
+    possible at force-split where one push closes more than one
+    segment).
+  - `SpeechSegmenter::flush_stream(session, stream, |seg| …)` and
+    `finish_stream(session, stream, |seg| …)` likewise return
+    `Result<Option<SpeechSegment>>`.
+  - `SpeechSegmenter::finish_stream` no longer resets the segmenter so
+    queued segments survive the call. Call `reset()` explicitly when
+    you want to reuse the segmenter for a new stream.
+  - `SpeechSegmenter::pending_segment_count()` (new) reports how many
+    segments are still awaiting a `push_samples(&[])` drain.
+  - `SpeechSegmenter::finish` no longer resets the segmenter — it
+    enqueues the trailing segment onto `pending_segments` and pops
+    the head, so undrained segments come out in order before the
+    trailing one. Callers that want to start a fresh stream after
+    `finish()` must call `reset()` explicitly.
+  - `Session::last_probabilities()` (new) exposes the slice recorded
+    by the most recent `process_stream` call. Identical to the slice
+    that call returned on the `Ok` path; empty after a failed call.
+- **Atomic streaming inference** — `Session::process_stream` and
+  `Session::flush_stream` now snapshot `*stream` at entry and
+  restore it on inference failure. On `Err`, `StreamState` is
+  exactly as it was before the call, the pending PCM tail is
+  preserved, and `prob_scratch` is empty. Callers can retry the
+  same call with the same `samples` and observe the same result —
+  no risk of `StreamState` and downstream segmentation drifting
+  apart on transient ORT errors.
+- `SpeechSegmenter::reset()` is no longer `const fn` — it now clears
+  the new internal `pending_segments` queue, which uses `VecDeque`.
+
+### Migration
+
+```rust
+// before (0.3.0)
+segmenter.process_samples(&mut session, &mut stream, samples, |seg| {
+    handle(seg);
+})?;
+segmenter.finish_stream(&mut session, &mut stream, |seg| handle(seg))?;
+```
+
+```rust
+// after (0.4.0)
+if let Some(seg) = segmenter.push_samples(&mut session, &mut stream, samples)? {
+    handle(seg);
+    while let Some(more) = segmenter.push_samples(&mut session, &mut stream, &[])? {
+        handle(more);
+    }
+}
+if let Some(seg) = segmenter.finish_stream(&mut session, &mut stream)? {
+    handle(seg);
+    while let Some(more) = segmenter.push_samples(&mut session, &mut stream, &[])? {
+        handle(more);
+    }
+}
+```
+
+The one-shot `silero::detect_speech` helper is unchanged.
+
 ## [0.3.0] - 2026-05-02
 
 ### Added
