@@ -1,5 +1,7 @@
 use core::time::Duration;
 
+#[cfg(feature = "onnx")]
+#[cfg_attr(docsrs, doc(cfg(feature = "onnx")))]
 pub use ort::session::builder::GraphOptimizationLevel;
 
 use crate::error::{Error, Result};
@@ -7,7 +9,7 @@ use crate::error::{Error, Result};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "serde")]
+#[cfg(all(feature = "serde", feature = "onnx"))]
 mod graph_optimization_level {
   use super::GraphOptimizationLevel;
   use serde::*;
@@ -131,6 +133,8 @@ impl SampleRate {
 /// policy such as `intra_threads` / `inter_threads` should normally be
 /// configured one layer up, then passed down via
 /// [`crate::Session::from_ort_session`].
+#[cfg(feature = "onnx")]
+#[cfg_attr(docsrs, doc(cfg(feature = "onnx")))]
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct SessionOptions {
@@ -144,6 +148,7 @@ pub struct SessionOptions {
   optimization_level: GraphOptimizationLevel,
 }
 
+#[cfg(feature = "onnx")]
 impl Default for SessionOptions {
   #[inline]
   fn default() -> Self {
@@ -151,6 +156,7 @@ impl Default for SessionOptions {
   }
 }
 
+#[cfg(feature = "onnx")]
 impl SessionOptions {
   /// Create a new `SessionOptions` with default values.
   #[cfg_attr(not(tarpaulin), inline(always))]
@@ -549,9 +555,12 @@ const fn effective_end_threshold(start_threshold: f32, end_threshold: f32) -> f3
 mod tests {
   use std::time::Duration;
 
+  #[cfg(feature = "onnx")]
   use ort::session::builder::GraphOptimizationLevel;
 
-  use super::{SampleRate, SessionOptions, SpeechOptions, ms_to_samples};
+  #[cfg(feature = "onnx")]
+  use super::SessionOptions;
+  use super::{SampleRate, SpeechOptions, ms_to_samples};
 
   #[test]
   fn sample_rate_contract_matches_silero_model() {
@@ -589,6 +598,7 @@ mod tests {
     );
   }
 
+  #[cfg(feature = "onnx")]
   #[test]
   fn session_options_default_to_unopinionated_core_settings() {
     let options = SessionOptions::default();
@@ -628,7 +638,7 @@ mod tests {
     assert_eq!(options.max_speech_samples(), Some(14_528));
   }
 
-  #[cfg(feature = "serde")]
+  #[cfg(all(feature = "serde", feature = "onnx"))]
   #[test]
   fn test_serde() {
     let opts = SessionOptions::default().with_optimization_level(GraphOptimizationLevel::Level2);

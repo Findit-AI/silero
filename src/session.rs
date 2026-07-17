@@ -4,8 +4,9 @@ use ort::{session::Session as OrtSession, value::TensorRef};
 
 use crate::{
   Result,
+  backend::VadBackend,
   error::Error,
-  options::SessionOptions,
+  options::{SampleRate, SessionOptions},
   stream::{MAX_CHUNK_SAMPLES, STATE_HIDDEN_DIM, STATE_LAYERS, STATE_VALUES, StreamState},
 };
 
@@ -69,6 +70,11 @@ pub struct Session {
   /// Cleared and re-filled each call; the returned slice borrows from
   /// this buffer.
   prob_scratch: Vec<f32>,
+  /// The single-stream memory backing the [`VadBackend`] implementation
+  /// (`predict` / `reset`). The multi-stream inherent API
+  /// (`infer_chunk`, `infer_batch`, `process_stream`, …) takes an
+  /// external `StreamState` and never touches this field.
+  stream: StreamState,
 }
 
 impl Session {
@@ -134,6 +140,7 @@ impl Session {
       state_scratch: Vec::new(),
       tail_scratch: Vec::with_capacity(MAX_CHUNK_SAMPLES),
       prob_scratch: Vec::new(),
+      stream: StreamState::new(SampleRate::default()),
     }
   }
 
@@ -474,6 +481,42 @@ impl Session {
   }
 }
 
+/// The bundled Silero ONNX model as a [`VadBackend`], declaring the
+/// 16 kHz / 512-sample frame geometry. `predict` and `reset` drive a
+/// single logical stream through the session's own internal
+/// [`StreamState`]; use the inherent multi-stream API for concurrent
+/// streams or 8 kHz audio.
+impl VadBackend for Session {
+  type Error = Error;
+
+  #[cfg_attr(not(tarpaulin), inline(always))]
+  fn frame_samples(&self) -> usize {
+    self.stream.sample_rate().chunk_samples()
+  }
+
+  #[cfg_attr(not(tarpaulin), inline(always))]
+  fn sample_rate(&self) -> SampleRate {
+    self.stream.sample_rate()
+  }
+
+  fn predict(&mut self, frame: &[f32]) -> Result<f32> {
+    // The four disjoint field borrows let the shared per-chunk helper
+    // reuse the session scratch buffers against the internal stream.
+    Self::infer_chunk_with_scratch(
+      &mut self.inner,
+      &mut self.input_scratch,
+      &mut self.state_scratch,
+      &mut self.stream,
+      frame,
+    )
+  }
+
+  #[cfg_attr(not(tarpaulin), inline(always))]
+  fn reset(&mut self) {
+    self.stream.reset();
+  }
+}
+
 #[cfg_attr(not(tarpaulin), inline(always))]
 fn validate_shape(tensor: &'static str, actual: &[i64], expected: &[i64]) -> Result<()> {
   if actual == expected {
@@ -622,5 +665,57 @@ mod tests {
       .expect("push bridging");
     assert_eq!(probs4.len(), 1, "exactly one chunk's worth of inference");
     assert_eq!(stream.pending_len(), 300 + chunk - chunk);
+  }
+
+  #[test]
+  fn vad_backend_predict_matches_infer_chunk_and_reset_clears_state() {
+    use crate::VadBackend;
+
+    const MODEL: &[u8] = include_bytes!(concat!(
+      env!("CARGO_MANIFEST_DIR"),
+      "/models/silero_vad.onnx"
+    ));
+    let mut via_trait = Session::from_memory(MODEL).expect("load");
+    let mut via_inherent = Session::from_memory(MODEL).expect("load");
+
+    // The OnnxBackend declares the 16 kHz / 512-sample geometry.
+    assert_eq!(
+      via_trait.frame_samples(),
+      SampleRate::Rate16k.chunk_samples()
+    );
+    assert_eq!(via_trait.sample_rate(), SampleRate::Rate16k);
+
+    // `predict` (internal stream) must track `infer_chunk` (external
+    // stream) frame-for-frame — the seam is the same inference path.
+    let frame = SampleRate::Rate16k.chunk_samples();
+    let mut stream = StreamState::new(SampleRate::Rate16k);
+    let mut value = 0x1234_5678_u32;
+    for _ in 0..6 {
+      let chunk: Vec<f32> = (0..frame)
+        .map(|_| {
+          value = value.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+          ((value >> 8) as f32 / (u32::MAX >> 8) as f32) * 2.0 - 1.0
+        })
+        .collect();
+      let trait_prob = via_trait.predict(&chunk).expect("predict");
+      let inherent_prob = via_inherent
+        .infer_chunk(&mut stream, &chunk)
+        .expect("infer_chunk");
+      assert_eq!(
+        trait_prob, inherent_prob,
+        "VadBackend::predict must equal infer_chunk on the same input"
+      );
+    }
+
+    // `reset` clears the recurrent state: a probe after reset matches a
+    // freshly loaded session's first probe.
+    via_trait.reset();
+    let mut fresh = Session::from_memory(MODEL).expect("load");
+    let probe = vec![0.0_f32; frame];
+    assert_eq!(
+      via_trait.predict(&probe).expect("predict"),
+      fresh.predict(&probe).expect("predict"),
+      "reset() must zero the recurrent state"
+    );
   }
 }
