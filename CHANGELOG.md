@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-18
+
+### Added
+
+- `VadBackend` — the backend seam. A minimal per-frame contract
+  (`frame_samples`, `sample_rate`, `predict`, `reset`, and an associated
+  `Error`) that the detector drives so the same segmentation semantics
+  work over any VAD model, not just the bundled ONNX one.
+- `detect_speech_with` — the backend-agnostic one-shot counterpart to
+  `detect_speech`, chunking a full buffer into `frame_samples`-sized
+  frames over any `VadBackend`.
+- `Session` now implements `VadBackend` (the ONNX backend), declaring the
+  16 kHz / 512-sample frame geometry and driving a single stream through
+  an internal `StreamState`.
+- `SpeechSegmenter::frame_samples` / `set_frame_samples` — the segmenter's
+  frame geometry is decoupled from `SampleRate::chunk_samples`, so a
+  backend that declares a different frame size (e.g. 4096) reuses the
+  segmentation rules unchanged.
+- `Error::Backend` — a transparent variant bridging any backend's
+  associated error into `silero::Error`.
+
+### Changed
+
+- **Breaking** — `ort` is now an optional dependency behind the default
+  `onnx` feature. `cargo build --no-default-features` produces a
+  logic-only crate (the segmenter, options, `SampleRate`, and the
+  `VadBackend` seam) with no `ort` dependency compiled at all.
+- **Breaking** — the ONNX surface now requires the `onnx` feature (on by
+  default via `bundled`): `Session`, `StreamState`, `BatchInput`,
+  `BUNDLED_MODEL`, `SessionOptions`, `GraphOptimizationLevel`, the
+  `detect_speech` helper,
+  `SpeechSegmenter::{push_samples, flush_stream, finish_stream}`, and the
+  `Error::{Ort, LoadModel}` variants. Default-feature callers are
+  unaffected and keep the same source-level API.
+- **Breaking** — `Error` is now `#[non_exhaustive]`; downstream `match`es
+  must include a `_` arm.
+- **Breaking** — the execution-provider passthrough features (`coreml`,
+  `directml`, `cuda`, `rocm`, `tensorrt`, `openvino`) now imply `onnx`.
+
+### Migration
+
+Default-feature callers need no changes. Callers who relied on
+`--no-default-features` still providing `Session` (which required `ort` to
+always be present) must now enable the `onnx` feature — or `bundled` for
+the embedded model — to compile the ONNX backend, the examples, and the
+integration/doc tests.
+
 ## [0.4.0] - 2026-05-09
 
 ### Changed
