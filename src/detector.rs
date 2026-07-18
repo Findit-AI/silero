@@ -517,6 +517,14 @@ pub fn detect_speech(
 /// behavior. The backend is *not* [`reset`](VadBackend::reset): pass a
 /// freshly constructed or reset backend to start a new stream.
 ///
+/// # Sample rate
+///
+/// The backend is authoritative for its own stream: the segmenter's
+/// duration thresholds and emitted [`SpeechSegment`] stamps are taken
+/// from [`backend.sample_rate()`](VadBackend::sample_rate), overriding
+/// whatever `sample_rate` the passed `options` carried. Configure the
+/// rate on the backend, not on `options`, when driving this helper.
+///
 /// # Errors
 ///
 /// Returns the backend's error, bridged into [`Error`](crate::Error), if
@@ -534,6 +542,12 @@ pub fn detect_speech_with<B: VadBackend>(
   let frame = backend.frame_samples();
   assert!(frame != 0, "VadBackend::frame_samples() must be non-zero");
   let mut segmenter = SpeechSegmenter::new(options);
+  // The backend owns its stream's sample rate: align the segmenter's
+  // duration conversions and segment stamps to it, overriding the rate
+  // the passed options carried. `set_sample_rate` also resets the frame
+  // geometry to that rate's model chunk, so re-apply the backend's frame
+  // size afterward.
+  segmenter.set_sample_rate(backend.sample_rate());
   segmenter.set_frame_samples(frame);
   let mut segments = Vec::new();
 
@@ -979,6 +993,11 @@ mod tests {
         fail_at: None,
       }
     }
+
+    fn with_sample_rate(mut self, sample_rate: SampleRate) -> Self {
+      self.sample_rate = sample_rate;
+      self
+    }
   }
 
   impl VadBackend for MockBackend {
@@ -1018,6 +1037,34 @@ mod tests {
     assert_eq!(segmenter.frame_samples(), 512);
     segmenter.set_frame_samples(4096);
     assert_eq!(segmenter.frame_samples(), 4096);
+  }
+
+  #[test]
+  fn detect_speech_with_uses_backend_sample_rate_not_options() {
+    // Regression (backend-seam High): the backend is authoritative for
+    // its stream's sample rate. An 8 kHz / 256-sample backend feeding
+    // 320 ms of speech (ten 0.9 frames over 2_560 samples) must produce
+    // one segment — 320 ms clears the 250 ms minimum at 8 kHz (2_000
+    // samples) — stamped 8 kHz, even though the passed options carry the
+    // default 16 kHz. Before the fix `detect_speech_with` built the
+    // segmenter straight from the 16 kHz options: it converted 250 ms to
+    // 4_000 samples, dropped the 2_560-sample run, and would have stamped
+    // any segment 16 kHz. Mutation: drop the `set_sample_rate` derivation
+    // in `detect_speech_with` → zero segments (and a 16 kHz stamp) → red.
+    let mut backend = MockBackend::new(256, vec![0.9; 10]).with_sample_rate(SampleRate::Rate8k);
+    let samples = vec![0.0_f32; 10 * 256];
+    let segments =
+      detect_speech_with(&mut backend, &samples, SpeechOptions::default()).expect("detect");
+    assert_eq!(
+      segments.len(),
+      1,
+      "320 ms of speech at the backend's 8 kHz must yield one segment"
+    );
+    assert_eq!(
+      segments[0].sample_rate(),
+      SampleRate::Rate8k,
+      "segment must be stamped with the backend's rate"
+    );
   }
 
   #[test]
