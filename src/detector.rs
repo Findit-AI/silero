@@ -195,10 +195,11 @@ impl SpeechSegmenter {
   /// the running sample counter, and any segments queued for
   /// `push_samples(&[])` drain.
   ///
-  /// This does not touch the `StreamState` buffer of un-chunked PCM —
-  /// that lives on the stream, not the segmenter — so callers that
-  /// reuse a stream for a new logical recording should also call
-  /// [`crate::StreamState::reset`] (or construct a fresh `StreamState`).
+  /// This does not touch the `StreamState` buffer of un-chunked PCM
+  /// (available with the `onnx` feature) — that lives on the stream, not
+  /// the segmenter — so callers that reuse a stream for a new logical
+  /// recording should also call `StreamState::reset` (or construct a
+  /// fresh `StreamState`).
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub fn reset(&mut self) {
     self.current_sample = 0;
@@ -372,9 +373,9 @@ impl SpeechSegmenter {
   /// drain the rest; call [`Self::reset`] explicitly when starting a
   /// new stream.
   ///
-  /// This does **not** flush the model tail — use
-  /// [`Self::finish_stream`] for the combined "flush model tail +
-  /// close trailing segment" end-of-stream operation.
+  /// This does **not** flush the model tail — use `finish_stream`
+  /// (available with the `onnx` feature) for the combined "flush model
+  /// tail + close trailing segment" end-of-stream operation.
   pub fn finish(&mut self) -> Option<SpeechSegment> {
     if let Some(trailing) = self.take_trailing() {
       self.pending_segments.push_back(trailing);
@@ -511,8 +512,9 @@ pub fn detect_speech(
 
 /// One-shot offline speech detection over any [`VadBackend`].
 ///
-/// The backend-agnostic counterpart to [`detect_speech`]: it chunks
-/// `samples` into [`frame_samples`](VadBackend::frame_samples)-sized
+/// The backend-agnostic counterpart to `detect_speech` (the bundled
+/// `onnx` helper): it chunks `samples` into
+/// [`frame_samples`](VadBackend::frame_samples)-sized
 /// frames, runs the backend once per frame, and applies the same
 /// segmentation rules as [`SpeechSegmenter`]. A trailing partial frame
 /// is zero-padded and flushed, matching `detect_speech`'s end-of-stream

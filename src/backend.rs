@@ -9,7 +9,7 @@ use crate::options::SampleRate;
 /// [`detect_speech_with`] one-shot helper — drives a backend through
 /// this trait and never touches the underlying model, so the same
 /// segmentation semantics work over the bundled ONNX backend
-/// ([`Session`], behind the default `onnx` feature) or any other
+/// (`Session`, behind the default `onnx` feature) or any other
 /// implementation (e.g. a CoreML backend declaring a different frame
 /// geometry).
 ///
@@ -26,7 +26,6 @@ use crate::options::SampleRate;
 ///
 /// [`SpeechSegmenter`]: crate::SpeechSegmenter
 /// [`detect_speech_with`]: crate::detect_speech_with
-/// [`Session`]: crate::Session
 pub trait VadBackend {
   /// The backend's own error type, bridged into [`crate::Error`].
   ///
