@@ -45,6 +45,21 @@ over. The default-feature runtime behavior of the bundled `Session` /
   scope with `use silero::SpeechSegmenterExt` to call them; behavior is
   identical (they drive the segmenter via its `push_probabilities` /
   `pop_pending` / `finish` sans-I/O seam).
+- **Breaking** — `SpeechSegmenter::{frame_samples, set_frame_samples}` were
+  renamed to `{frame_hop, set_frame_hop}`. Hop is the accurate concept for
+  the push-based redesign: the timeline advance of a single emitted
+  probability. This is the consumer-facing accessor rename on the segmenter
+  itself — distinct from the `VadBackend` `frame_samples()` → `push` /
+  `frame_hop()` contract change above, which only affects backend
+  *implementors*. The values are unchanged for the bundled Silero geometry
+  (hop == frame == chunk == 512 at 16 kHz).
+- **Breaking** — `SampleRate::context_samples()` (public at 0.5.0) is gone
+  from the public `SampleRate`. The Silero rolling-context geometry it
+  reported (64 samples at 16 kHz, 32 at 8 kHz) is Session-specific and now
+  lives crate-private on the `onnx` `Session` path; the re-exported `zuoer`
+  `SampleRate` carries only backend-agnostic geometry (`hz`,
+  `chunk_samples`). There is no public replacement — a caller reading
+  `context_samples()` was depending on Silero-internal `Session` geometry.
 - **Breaking** — four backend-agnostic `Error` variants
   (`UnsupportedSampleRate`, `IncompatibleSampleRate`, `InvalidChunkLength`,
   `Backend`) moved to `zuoer::Error` and reach `silero::Error` through the
@@ -86,6 +101,15 @@ over. The default-feature runtime behavior of the bundled `Session` /
   backend and of `detect_speech_with` need no change.
 - Calling a moved streaming method (`push_samples` / `flush_stream` /
   `finish_stream`): add `use silero::SpeechSegmenterExt;`.
+- Reading or overriding the segmenter's frame geometry: rename
+  `SpeechSegmenter::frame_samples` → `frame_hop` and `set_frame_samples` →
+  `set_frame_hop`. Same values for the bundled Silero geometry
+  (hop == frame == 512), so it is a pure rename for default callers.
+- Reading `SampleRate::context_samples()`: drop the call — there is no
+  public replacement, it exposed Session-internal rolling-context geometry
+  and reading it reached into Silero internals. The bundled `Session`
+  computes this context itself, so callers of `Session` / `detect_speech` /
+  `detect_speech_with` need no change.
 - Matching a moved error variant: match `silero::Error::Core(inner)`, then
   `inner` against `silero::zuoer::Error::{UnsupportedSampleRate,
   IncompatibleSampleRate, InvalidChunkLength, Backend}` — no direct `zuoer`
