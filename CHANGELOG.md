@@ -48,11 +48,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Migration
 
-Default-feature callers need no changes. Callers who relied on
+Default-feature callers keep the same source-level API, with one
+exception: an exhaustive `match` on `Error` must add a `_` arm, since
+`Error` is now `#[non_exhaustive]` (see above). Callers who relied on
 `--no-default-features` still providing `Session` (which required `ort` to
-always be present) must now enable the `onnx` feature — or `bundled` for
-the embedded model — to compile the ONNX backend, the examples, and the
-integration/doc tests.
+always be present) must additionally enable the `onnx` feature — or
+`bundled` for the embedded model — to compile the ONNX backend, the
+examples, and the integration/doc tests.
 
 ## [0.4.0] - 2026-05-09
 
