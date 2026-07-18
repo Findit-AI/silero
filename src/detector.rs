@@ -246,7 +246,9 @@ impl SpeechSegmenter {
 
     let start = self.active_start?;
     let raw_start = self.active_raw_start?;
-    if let Some(max_speech_samples) = self.options.max_speech_samples()
+    if let Some(max_speech_samples) = self
+      .options
+      .max_speech_samples_for_frame(self.frame_samples)
       && frame_start.saturating_sub(raw_start) > max_speech_samples
     {
       return self.split_at_max_duration(frame_start, probability);
@@ -1116,6 +1118,35 @@ mod tests {
     );
     assert_eq!(segments[0].start_sample(), 0);
     assert_eq!(segments[0].end_sample(), 4 * 4096);
+  }
+
+  #[test]
+  fn mock_geometry_max_speech_lookahead_is_frame_aware() {
+    // Regression (backend-seam Medium): the max-speech force-split
+    // lookahead must subtract the ACTIVE frame size, not the sample rate's
+    // model chunk. A 4096-sample backend at 16 kHz with a 1 s max-speech
+    // ceiling (speech_pad 0) has a frame-aware threshold of
+    // 16_000 − 4_096 = 11_904, so the first frame_start past it is 12_288
+    // (768 ms) and the split lands there. The old chunk-based threshold
+    // (16_000 − 512 = 15_488) split one frame later, at frame_start
+    // 16_384 (1.024 s) — overshooting the configured 1 s maximum. Mutation:
+    // revert the lookahead to `chunk_samples()` → the split moves to
+    // 16_384 → red.
+    let mut backend = MockBackend::new(4096, vec![0.9; 6]);
+    let samples = vec![0.0_f32; 6 * 4096];
+    let options = SpeechOptions::default()
+      .with_min_speech_duration(Duration::ZERO)
+      .with_speech_pad(Duration::ZERO)
+      .with_max_speech_duration(Duration::from_millis(1_000));
+    let segments = detect_speech_with(&mut backend, &samples, options).expect("detect");
+
+    assert_eq!(segments[0].start_sample(), 0);
+    assert_eq!(
+      segments[0].end_sample(),
+      12_288,
+      "max-speech split must land at the frame-aware 12_288, not the \
+       chunk-based overshoot 16_384"
+    );
   }
 
   #[test]
