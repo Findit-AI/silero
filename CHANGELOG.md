@@ -9,29 +9,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.6.0]
 
+This is a pre-1.0 breaking release. Cargo semver permits the breaks below;
+they are documented here with per-break migration lines rather than papered
+over. The default-feature runtime behavior of the bundled `Session` /
+`detect_speech` path is unchanged.
+
 ### Changed
 
 - **Breaking** — the backend-agnostic VAD core now lives in the
   [`zuoer`](https://github.com/findit-studio/zuoer) crate and is re-exported
   here. `VadBackend`, `SpeechSegmenter`, `SpeechDetector`, `SpeechSegment`,
   `SpeechOptions`, `SampleRate`, and `detect_speech_with` keep resolving
-  under `silero::` unchanged; `cargo build --no-default-features` is now a
-  thin re-export shell over `zuoer` (no `ort`). The bundled ONNX model,
+  under `silero::`; `cargo build --no-default-features` is now a thin
+  re-export shell over `zuoer` (no `ort`). The bundled ONNX model,
   `Session`, `StreamState`, `BatchInput`, `SessionOptions`,
   `GraphOptimizationLevel`, and the `detect_speech` helper stay in this
-  crate.
+  crate. The `zuoer` crate itself is re-exported as `silero::zuoer` so
+  consumers can name its types (see the error and result breaks below)
+  without adding a direct `zuoer` dependency.
+- **Breaking** — `VadBackend` is now push-based. The per-frame
+  `predict(&[f32]) -> Result<f32>` + `frame_samples()` contract is replaced
+  by `push(&[f32], &mut dyn FnMut(f32))` + `finish(&mut dyn FnMut(f32))` +
+  `frame_hop()`: a backend now owns its input windowing (overlapping
+  analysis windows and delayed first output are expressible — e.g. a
+  400-sample window at a 160-sample hop) and its end-of-stream
+  trailing-frame policy (zero-pad the last partial frame, or drop it —
+  `snip_edges`), emitting probabilities through a `sink`. The
+  associated-error bound is `Error: Into<zuoer::Error>`. The bundled
+  `Session` backend is behaviorally unchanged (window == hop == chunk,
+  zero-padded tail). Only code that *implements* `VadBackend` for its own
+  model must migrate.
 - **Breaking** — `SpeechSegmenter::{push_samples, flush_stream,
   finish_stream}` moved to the new `SpeechSegmenterExt` extension trait,
   since `SpeechSegmenter` is now a foreign (`zuoer`) type. Bring it into
   scope with `use silero::SpeechSegmenterExt` to call them; behavior is
   identical (they drive the segmenter via its `push_probabilities` /
   `pop_pending` / `finish` sans-I/O seam).
-- **Breaking** — the backend-agnostic `Error` variants
-  (`UnsupportedSampleRate`, `IncompatibleSampleRate`, `MixedBatchSampleRate`,
-  `InvalidChunkLength`, `UnexpectedOutputShape`, `Backend`) moved to
-  `zuoer::Error` and reach `silero::Error` through the new transparent
-  `Error::Core` bridge; `Error::{LoadModel, Ort}` stay. `Display` output is
-  unchanged; `match`es on a moved variant must go through `Error::Core(..)`.
+- **Breaking** — four backend-agnostic `Error` variants
+  (`UnsupportedSampleRate`, `IncompatibleSampleRate`, `InvalidChunkLength`,
+  `Backend`) moved to `zuoer::Error` and reach `silero::Error` through the
+  new transparent `Error::Core` bridge. The two Session-specific variants
+  (`MixedBatchSampleRate`, `UnexpectedOutputShape`) remain in `silero::Error`
+  (behind the `onnx` feature); `Error::{LoadModel, Ort}` stay. A `match` on a
+  *moved* variant must go through `Error::Core(zuoer::Error::…)`; the two
+  retained variants, `LoadModel`, and `Ort` still match directly on
+  `silero::Error`.
+- **Breaking** — the re-exported `zuoer` callables carry `zuoer`'s types, so
+  `silero::SampleRate::from_hz` and `silero::detect_speech_with` now yield
+  `zuoer::Error`, not `silero::Error`. A function typed `-> silero::Result<_>`
+  that forwards one of these directly must wrap it (`Ok(call()?)` or
+  `.map_err(silero::Error::from)`); the `From<zuoer::Error> for silero::Error`
+  bridge makes both work. (`silero::Result` is still silero's own alias — only
+  the *values* the re-exported `zuoer` functions produce changed crate.)
+- **Breaking** — the `From<silero::Error> for zuoer::Error` bridge is now
+  total and feature-free (previously `onnx`-gated), so a logic-only consumer
+  built `--no-default-features` (no `ort`) can implement `VadBackend` with
+  `type Error = silero::Error`.
+- **Breaking (`Display`)** — the 0.5.0→0.6.0 note that claimed `Display`
+  output was unchanged was wrong: two moved variants now render `zuoer`'s
+  generic wording.
+  - `UnsupportedSampleRate`: `"… (Silero VAD only supports 8 kHz and 16 kHz
+    directly)"` → `"… (only 8 kHz and 16 kHz are supported directly)"`.
+  - `InvalidChunkLength`: `"invalid Silero chunk length: …"` → `"invalid VAD
+    chunk length: …"`.
+  `IncompatibleSampleRate`, `MixedBatchSampleRate`, and
+  `UnexpectedOutputShape` render exactly as in 0.5.0 (the latter two stayed
+  silero-owned; the `IncompatibleSampleRate` string was already identical).
+  Never match on `Display` text.
+
+### Migration
+
+- Implementing `VadBackend` yourself: replace `predict` + `frame_samples`
+  with `push` + `finish` + `frame_hop`. Buffer your own partial-frame tail,
+  emit one probability per completed frame via the `sink`, and choose your
+  end-of-stream tail policy in `finish`. Callers of the bundled `Session`
+  backend and of `detect_speech_with` need no change.
+- Calling a moved streaming method (`push_samples` / `flush_stream` /
+  `finish_stream`): add `use silero::SpeechSegmenterExt;`.
+- Matching a moved error variant: match `silero::Error::Core(inner)`, then
+  `inner` against `silero::zuoer::Error::{UnsupportedSampleRate,
+  IncompatibleSampleRate, InvalidChunkLength, Backend}` — no direct `zuoer`
+  dependency needed, it is re-exported as `silero::zuoer`.
+  `MixedBatchSampleRate` / `UnexpectedOutputShape` still match directly on
+  `silero::Error`.
+- A `-> silero::Result<_>` function forwarding a re-exported `zuoer`
+  callable: change e.g. `SampleRate::from_hz(hz)` to
+  `Ok(SampleRate::from_hz(hz)?)` (or `.map_err(silero::Error::from)`).
 
 ### Notes
 

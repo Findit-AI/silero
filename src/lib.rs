@@ -27,10 +27,17 @@ mod session;
 #[cfg(feature = "onnx")]
 mod stream;
 
-// The backend-agnostic VAD core lives in `zuoer`; re-export it so the 0.5.0
-// source-level API keeps resolving under `silero::` (`silero::VadBackend`,
-// `silero::SpeechSegmenter`, `silero::detect_speech_with`, the options /
-// duration / sample-rate types).
+// Re-export the `zuoer` core crate itself so consumers can name its types
+// without taking a direct `zuoer` dependency: `silero::zuoer::Error` to
+// match the nested `Error::Core(..)` bridge, or the moved
+// `zuoer::Error::{UnsupportedSampleRate, IncompatibleSampleRate,
+// InvalidChunkLength, Backend}` variant paths.
+pub use zuoer;
+
+// The backend-agnostic VAD core lives in `zuoer`; re-export its surface so
+// the 0.5.0 source-level API keeps resolving under `silero::`
+// (`silero::VadBackend`, `silero::SpeechSegmenter`,
+// `silero::detect_speech_with`, the options / duration / sample-rate types).
 pub use zuoer::{
   SampleRate, SpeechDetector, SpeechOptions, SpeechSegment, SpeechSegmenter, VadBackend,
   detect_speech_with,

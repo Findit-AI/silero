@@ -6,7 +6,7 @@
 
 use silero::{
   BatchInput, SampleRate, Session, SpeechOptions, SpeechSegmenter, SpeechSegmenterExt, StreamState,
-  detect_speech,
+  detect_speech, detect_speech_with,
 };
 
 const MODEL_BYTES: &[u8] = include_bytes!(concat!(
@@ -212,4 +212,32 @@ fn finish_stream_clears_active_state_so_a_followup_finish_does_not_re_emit() {
   );
   let trailing = segmenter.finish();
   assert!(trailing.is_none(), "follow-up finish() must not re-emit");
+}
+
+#[test]
+fn detect_speech_with_over_session_backend_matches_detect_speech() {
+  // The generic `zuoer::detect_speech_with` driving the `Session` as a
+  // `VadBackend` (push + finish) must agree with silero's own
+  // `detect_speech` (push_samples + finish_stream) on the same
+  // non-chunk-aligned buffer: both feed the identical inference and apply
+  // Silero's zero-pad end-of-stream policy to the trailing partial frame.
+  // This is the cross-check that the redesigned backend seam produces the
+  // same segments as the bundled helper — and it exercises
+  // `VadBackend::push` AND `VadBackend::finish` (the padded-tail path) over
+  // the real model.
+  let mut backend_session = test_session();
+  let mut helper_session = test_session();
+  // 3 full chunks plus a half-chunk tail that finish() must zero-pad.
+  let chunk = SampleRate::Rate16k.chunk_samples();
+  let audio = pseudo_audio(chunk * 3 + chunk / 2);
+  let config = SpeechOptions::default().with_sample_rate(SampleRate::Rate16k);
+
+  let via_generic =
+    detect_speech_with(&mut backend_session, &audio, config.clone()).expect("detect_speech_with");
+  let via_helper = detect_speech(&mut helper_session, &audio, config).expect("detect_speech");
+
+  assert_eq!(
+    via_generic, via_helper,
+    "the generic VadBackend seam (push + finish) must match the bundled detect_speech helper"
+  );
 }

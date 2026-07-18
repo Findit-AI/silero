@@ -6,7 +6,9 @@ use crate::{
   Result, SampleRate, VadBackend,
   error::Error,
   options::SessionOptions,
-  stream::{MAX_CHUNK_SAMPLES, STATE_HIDDEN_DIM, STATE_LAYERS, STATE_VALUES, StreamState},
+  stream::{
+    MAX_CHUNK_SAMPLES, STATE_HIDDEN_DIM, STATE_LAYERS, STATE_VALUES, StreamState, context_samples,
+  },
 };
 
 const INPUT_NAME: &str = "input";
@@ -174,7 +176,7 @@ impl Session {
       );
     }
 
-    let context_samples = sample_rate.context_samples();
+    let context_samples = context_samples(sample_rate);
     let input_len = chunk_samples + context_samples;
 
     input_scratch.clear();
@@ -229,19 +231,16 @@ impl Session {
 
     let sample_rate = batch[0].stream.sample_rate();
     let chunk_samples = sample_rate.chunk_samples();
-    let context_samples = sample_rate.context_samples();
+    let context_samples = context_samples(sample_rate);
     let input_len = chunk_samples + context_samples;
     let batch_size = batch.len();
 
     for item in batch.iter() {
       if item.stream.sample_rate() != sample_rate {
-        return Err(
-          zuoer::Error::MixedBatchSampleRate {
-            expected: sample_rate.hz(),
-            actual: item.stream.sample_rate().hz(),
-          }
-          .into(),
-        );
+        return Err(Error::MixedBatchSampleRate {
+          expected: sample_rate.hz(),
+          actual: item.stream.sample_rate().hz(),
+        });
       }
       if item.chunk.len() != chunk_samples {
         return Err(
@@ -459,23 +458,48 @@ impl Session {
     // probabilities from a prior `process_stream` after a flush call —
     // matches the atomicity contract advertised in the changelog.
     self.prob_scratch.clear();
+    Self::flush_internal(
+      &mut self.inner,
+      &mut self.input_scratch,
+      &mut self.state_scratch,
+      &mut self.tail_scratch,
+      stream,
+    )
+  }
+
+  /// Zero-pad the trailing partial chunk and run it, returning its
+  /// probability (or `None` when there is no pending tail). Atomic: the
+  /// stream is snapshotted and restored on inference failure so the
+  /// pending PCM tail survives a retry.
+  ///
+  /// Shared by [`Self::flush_stream`] (external stream) and the
+  /// [`VadBackend::finish`] end-of-stream policy (internal stream). Takes
+  /// disjoint field borrows so either caller can drive it against its
+  /// stream.
+  fn flush_internal(
+    inner: &mut OrtSession,
+    input_scratch: &mut Vec<f32>,
+    state_scratch: &mut Vec<f32>,
+    tail_scratch: &mut Vec<f32>,
+    stream: &mut StreamState,
+  ) -> Result<Option<f32>> {
     if !stream.has_pending() {
       return Ok(None);
     }
     let snapshot = stream.clone();
 
     let chunk_samples = stream.sample_rate().chunk_samples();
-    self.tail_scratch.clear();
-    self.tail_scratch.resize(chunk_samples, 0.0);
+    tail_scratch.clear();
+    tail_scratch.resize(chunk_samples, 0.0);
     let pending_len = stream.pending_len();
-    self.tail_scratch[..pending_len].copy_from_slice(stream.pending());
+    tail_scratch[..pending_len].copy_from_slice(stream.pending());
 
     match Self::infer_chunk_with_scratch(
-      &mut self.inner,
-      &mut self.input_scratch,
-      &mut self.state_scratch,
+      inner,
+      input_scratch,
+      state_scratch,
       stream,
-      &self.tail_scratch[..chunk_samples],
+      &tail_scratch[..chunk_samples],
     ) {
       Ok(probability) => {
         stream.clear_pending();
@@ -490,15 +514,16 @@ impl Session {
 }
 
 /// The bundled Silero ONNX model as a [`VadBackend`], declaring the
-/// 16 kHz / 512-sample frame geometry. `predict` and `reset` drive a
-/// single logical stream through the session's own internal
-/// [`StreamState`]; use the inherent multi-stream API for concurrent
-/// streams or 8 kHz audio.
+/// 16 kHz / 512-sample frame geometry (window == hop, no overlap). `push`,
+/// `finish`, and `reset` drive a single logical stream through the
+/// session's own internal [`StreamState`]; use the inherent multi-stream
+/// API for concurrent streams or 8 kHz audio.
 impl VadBackend for Session {
   type Error = Error;
 
   #[cfg_attr(not(tarpaulin), inline(always))]
-  fn frame_samples(&self) -> usize {
+  fn frame_hop(&self) -> usize {
+    // Silero's window equals its hop, so the hop is the chunk size.
     self.stream.sample_rate().chunk_samples()
   }
 
@@ -507,16 +532,53 @@ impl VadBackend for Session {
     self.stream.sample_rate()
   }
 
-  fn predict(&mut self, frame: &[f32]) -> Result<f32> {
-    // The four disjoint field borrows let the shared per-chunk helper
-    // reuse the session scratch buffers against the internal stream.
-    Self::infer_chunk_with_scratch(
-      &mut self.inner,
-      &mut self.input_scratch,
-      &mut self.state_scratch,
-      &mut self.stream,
-      frame,
-    )
+  fn push(&mut self, samples: &[f32], sink: &mut dyn FnMut(f32)) -> Result<()> {
+    // Drive the internal single-stream memory over the incoming PCM,
+    // emitting one probability per full Silero chunk. Disjoint field
+    // borrows let the shared inner loop reuse the session scratch buffers
+    // against `self.stream`; the reused `prob_scratch` keeps the hot path
+    // allocation-free (no per-call probability Vec).
+    let Self {
+      inner,
+      input_scratch,
+      state_scratch,
+      tail_scratch,
+      prob_scratch,
+      stream,
+    } = self;
+    prob_scratch.clear();
+    Self::process_stream_inner(
+      inner,
+      input_scratch,
+      state_scratch,
+      tail_scratch,
+      prob_scratch,
+      stream,
+      samples,
+    )?;
+    for &probability in prob_scratch.iter() {
+      sink(probability);
+    }
+    Ok(())
+  }
+
+  fn finish(&mut self, sink: &mut dyn FnMut(f32)) -> Result<()> {
+    // Silero's end-of-stream policy: zero-pad the trailing partial chunk
+    // and emit its probability (a snip-edges backend would drop it).
+    let Self {
+      inner,
+      input_scratch,
+      state_scratch,
+      tail_scratch,
+      stream,
+      ..
+    } = self;
+    if let Some(probability) =
+      Self::flush_internal(inner, input_scratch, state_scratch, tail_scratch, stream)?
+    {
+      sink(probability);
+    }
+    Ok(())
   }
 
   #[cfg_attr(not(tarpaulin), inline(always))]
@@ -530,13 +592,10 @@ fn validate_shape(tensor: &'static str, actual: &[i64], expected: &[i64]) -> Res
   if actual == expected {
     Ok(())
   } else {
-    Err(
-      zuoer::Error::UnexpectedOutputShape {
-        tensor,
-        shape: actual.to_vec(),
-      }
-      .into(),
-    )
+    Err(Error::UnexpectedOutputShape {
+      tensor,
+      shape: actual.to_vec(),
+    })
   }
 }
 
@@ -679,7 +738,7 @@ mod tests {
   }
 
   #[test]
-  fn vad_backend_predict_matches_infer_chunk_and_reset_clears_state() {
+  fn vad_backend_push_matches_infer_chunk_and_reset_clears_state() {
     use crate::VadBackend;
 
     const MODEL: &[u8] = include_bytes!(concat!(
@@ -689,15 +748,14 @@ mod tests {
     let mut via_trait = Session::from_memory(MODEL).expect("load");
     let mut via_inherent = Session::from_memory(MODEL).expect("load");
 
-    // The OnnxBackend declares the 16 kHz / 512-sample geometry.
-    assert_eq!(
-      via_trait.frame_samples(),
-      SampleRate::Rate16k.chunk_samples()
-    );
+    // The Silero backend declares the 16 kHz / 512-sample geometry, with
+    // its hop equal to its frame (no overlap).
+    assert_eq!(via_trait.frame_hop(), SampleRate::Rate16k.chunk_samples());
     assert_eq!(via_trait.sample_rate(), SampleRate::Rate16k);
 
-    // `predict` (internal stream) must track `infer_chunk` (external
-    // stream) frame-for-frame — the seam is the same inference path.
+    // `push` of one exact chunk (internal stream) must emit exactly one
+    // probability, tracking `infer_chunk` (external stream) frame-for-frame
+    // — the seam is the same inference path.
     let frame = SampleRate::Rate16k.chunk_samples();
     let mut stream = StreamState::new(SampleRate::Rate16k);
     let mut value = 0x1234_5678_u32;
@@ -708,24 +766,39 @@ mod tests {
           ((value >> 8) as f32 / (u32::MAX >> 8) as f32) * 2.0 - 1.0
         })
         .collect();
-      let trait_prob = via_trait.predict(&chunk).expect("predict");
+      let mut emitted = Vec::new();
+      via_trait
+        .push(&chunk, &mut |probability| emitted.push(probability))
+        .expect("push");
+      assert_eq!(
+        emitted.len(),
+        1,
+        "one full chunk must emit exactly one probability"
+      );
       let inherent_prob = via_inherent
         .infer_chunk(&mut stream, &chunk)
         .expect("infer_chunk");
       assert_eq!(
-        trait_prob, inherent_prob,
-        "VadBackend::predict must equal infer_chunk on the same input"
+        emitted[0], inherent_prob,
+        "VadBackend::push must emit infer_chunk's probability on the same input"
       );
     }
 
-    // `reset` clears the recurrent state: a probe after reset matches a
-    // freshly loaded session's first probe.
+    // `reset` clears the recurrent state (and the partial-frame buffer): a
+    // probe after reset matches a freshly loaded session's first probe.
     via_trait.reset();
     let mut fresh = Session::from_memory(MODEL).expect("load");
     let probe = vec![0.0_f32; frame];
+    let mut after_reset = Vec::new();
+    via_trait
+      .push(&probe, &mut |probability| after_reset.push(probability))
+      .expect("push");
+    let mut fresh_probe = Vec::new();
+    fresh
+      .push(&probe, &mut |probability| fresh_probe.push(probability))
+      .expect("push");
     assert_eq!(
-      via_trait.predict(&probe).expect("predict"),
-      fresh.predict(&probe).expect("predict"),
+      after_reset, fresh_probe,
       "reset() must zero the recurrent state"
     );
   }
