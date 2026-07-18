@@ -64,7 +64,9 @@ fn batch_inference_matches_single_stream_inference() {
   let audio_b = pseudo_audio(SampleRate::Rate16k.chunk_samples() * 6 + 13);
 
   let expected_a: Vec<f32> = audio_a
-    .chunks_exact(SampleRate::Rate16k.chunk_samples())
+    .as_chunks::<{ SampleRate::Rate16k.chunk_samples() }>()
+    .0
+    .iter()
     .map(|chunk| {
       single_session
         .infer_chunk(&mut single_a, chunk)
@@ -72,7 +74,9 @@ fn batch_inference_matches_single_stream_inference() {
     })
     .collect();
   let expected_b: Vec<f32> = audio_b[..SampleRate::Rate16k.chunk_samples() * 6]
-    .chunks_exact(SampleRate::Rate16k.chunk_samples())
+    .as_chunks::<{ SampleRate::Rate16k.chunk_samples() }>()
+    .0
+    .iter()
     .map(|chunk| {
       single_session
         .infer_chunk(&mut single_b, chunk)
@@ -83,10 +87,14 @@ fn batch_inference_matches_single_stream_inference() {
   let mut actual_a = Vec::new();
   let mut actual_b = Vec::new();
   for (chunk_a, chunk_b) in audio_a
-    .chunks_exact(SampleRate::Rate16k.chunk_samples())
+    .as_chunks::<{ SampleRate::Rate16k.chunk_samples() }>()
+    .0
+    .iter()
     .zip(
       audio_b[..SampleRate::Rate16k.chunk_samples() * 6]
-        .chunks_exact(SampleRate::Rate16k.chunk_samples()),
+        .as_chunks::<{ SampleRate::Rate16k.chunk_samples() }>()
+        .0
+        .iter(),
     )
   {
     let mut batch = [

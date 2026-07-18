@@ -52,11 +52,7 @@ tensorrt = ["onnx", "ort/tensorrt"]
 openvino = ["onnx", "ort/openvino"]
 
 [dependencies]
-# The backend-agnostic VAD core: the `VadBackend` seam, `SpeechSegmenter`,
-# `SpeechOptions`, `SampleRate`, and `detect_speech_with`. Re-exported so the
-# 0.5.0 source-level API keeps resolving. Pinned to the pre-publish git rev;
-# switch to `zuoer = "0.1"` once it publishes (the 0.6.0 release gate).
-zuoer = { git = "https://github.com/findit-studio/zuoer", rev = "fd4b06821339f821cc044c510ea0886732662f85" }
+zuoer = "0.1"
 ort = { version = "2.0.0-rc.12", optional = true }
 thiserror = "2"
 
