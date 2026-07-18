@@ -1,12 +1,27 @@
 use std::ops::Range;
 
-use crate::options::SampleRate;
+use crate::SampleRate;
 
 pub(crate) const STATE_LAYERS: usize = 2;
 pub(crate) const STATE_HIDDEN_DIM: usize = 128;
 pub(crate) const STATE_VALUES: usize = STATE_LAYERS * STATE_HIDDEN_DIM;
-pub(crate) const MAX_CONTEXT_SAMPLES: usize = SampleRate::Rate16k.context_samples();
+pub(crate) const MAX_CONTEXT_SAMPLES: usize = context_samples(SampleRate::Rate16k);
 pub(crate) const MAX_CHUNK_SAMPLES: usize = SampleRate::Rate16k.chunk_samples();
+
+/// Number of context samples the Silero model prepends to each chunk for a
+/// given sample rate (`32` at 8 kHz, `64` at 16 kHz).
+///
+/// Session-specific geometry: the model concatenates this many trailing
+/// samples of the previous chunk in front of the current one. It lives with
+/// the Silero backend rather than on `zuoer`'s `SampleRate` because it is
+/// meaningful only to this model, not to the backend-agnostic core.
+#[cfg_attr(not(tarpaulin), inline(always))]
+pub(crate) const fn context_samples(sample_rate: SampleRate) -> usize {
+  match sample_rate {
+    SampleRate::Rate8k => 32,
+    SampleRate::Rate16k => 64,
+  }
+}
 
 /// Per-stream model memory for Silero VAD.
 ///
@@ -78,12 +93,12 @@ impl StreamState {
 
   #[inline]
   pub(crate) fn context(&self) -> &[f32] {
-    &self.context[..self.sample_rate.context_samples()]
+    &self.context[..context_samples(self.sample_rate)]
   }
 
   #[inline]
   pub(crate) fn context_mut(&mut self) -> &mut [f32] {
-    let context_len = self.sample_rate.context_samples();
+    let context_len = context_samples(self.sample_rate);
     &mut self.context[..context_len]
   }
 
@@ -131,7 +146,7 @@ fn layer_range(layer: usize) -> Range<usize> {
 
 #[cfg(test)]
 mod tests {
-  use crate::options::SampleRate;
+  use crate::SampleRate;
 
   use super::StreamState;
 
@@ -154,5 +169,14 @@ mod tests {
     state.set_sample_rate(SampleRate::Rate8k);
     assert_eq!(state.context().len(), 32);
     assert!(state.context().iter().all(|value| *value == 0.0));
+  }
+
+  #[test]
+  fn context_samples_contract_matches_silero_model() {
+    // The Session-specific context geometry, moved here from zuoer's
+    // `SampleRate` (the backend-agnostic core has no use for it): 32
+    // context samples at 8 kHz, 64 at 16 kHz.
+    assert_eq!(super::context_samples(SampleRate::Rate16k), 64);
+    assert_eq!(super::context_samples(SampleRate::Rate8k), 32);
   }
 }

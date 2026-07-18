@@ -2,37 +2,55 @@
 #![cfg_attr(
   not(feature = "onnx"),
   doc = "Logic-only build of the `silero` VAD crate: the default `onnx` \
-         feature is disabled, so no ONNX/`ort` backend is compiled. The \
-         backend-agnostic detection surface — `SpeechSegmenter`, \
-         `SpeechOptions`, `SpeechSegment`, the `VadBackend` seam, and \
-         `detect_speech_with` — is available. Enable the default `onnx` \
+         feature is disabled, so no ONNX/`ort` backend is compiled. This \
+         build is a thin re-export shell over the [`zuoer`] VAD core — the \
+         backend-agnostic detection surface (`SpeechSegmenter`, \
+         `SpeechOptions`, `SpeechSegment`, `SampleRate`, the `VadBackend` \
+         seam, and `detect_speech_with`) is re-exported from `zuoer` and \
+         resolves under `silero::` as before. Enable the default `onnx` \
          feature (or `bundled`) for the bundled Silero model, `Session`, \
-         `StreamState`, and the one-shot `detect_speech` helper."
+         `StreamState`, the `SpeechSegmenterExt` streaming driver, and the \
+         one-shot `detect_speech` helper."
 )]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(docsrs, allow(unused_attributes))]
 #![deny(missing_docs)]
 #![forbid(unsafe_code)]
 
-mod backend;
+#[cfg(feature = "onnx")]
 mod detector;
 mod error;
+#[cfg(feature = "onnx")]
 mod options;
 #[cfg(feature = "onnx")]
 mod session;
 #[cfg(feature = "onnx")]
 mod stream;
 
-pub use backend::VadBackend;
+// Re-export the `zuoer` core crate itself so consumers can name its types
+// without taking a direct `zuoer` dependency: `silero::zuoer::Error` to
+// match the nested `Error::Core(..)` bridge, or the moved
+// `zuoer::Error::{UnsupportedSampleRate, IncompatibleSampleRate,
+// InvalidChunkLength, Backend}` variant paths.
+pub use zuoer;
+
+// The backend-agnostic VAD core lives in `zuoer`; re-export its surface so
+// the 0.5.0 source-level API keeps resolving under `silero::`
+// (`silero::VadBackend`, `silero::SpeechSegmenter`,
+// `silero::detect_speech_with`, the options / duration / sample-rate types).
+pub use zuoer::{
+  SampleRate, SpeechDetector, SpeechOptions, SpeechSegment, SpeechSegmenter, VadBackend,
+  detect_speech_with,
+};
+
+pub use error::{Error, Result};
+
 #[cfg(feature = "onnx")]
 #[cfg_attr(docsrs, doc(cfg(feature = "onnx")))]
-pub use detector::detect_speech;
-pub use detector::{SpeechDetector, SpeechSegment, SpeechSegmenter, detect_speech_with};
-pub use error::{Error, Result};
+pub use detector::{SpeechSegmenterExt, detect_speech};
 #[cfg(feature = "onnx")]
 #[cfg_attr(docsrs, doc(cfg(feature = "onnx")))]
 pub use options::{GraphOptimizationLevel, SessionOptions};
-pub use options::{SampleRate, SpeechOptions};
 
 /// Version string of the `silero` crate (`CARGO_PKG_VERSION`).
 ///

@@ -1,6 +1,6 @@
 [package]
 name = "silero"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.88"
 repository = "https://github.com/Findit-AI/silero"
@@ -36,7 +36,7 @@ onnx = ["dep:ort"]
 # The bundled `silero_vad.onnx` model bytes. Only useful with the ONNX backend,
 # so it pulls in `onnx`.
 bundled = ["onnx"]
-serde = ["dep:serde", "dep:humantime-serde"]
+serde = ["dep:serde", "dep:humantime-serde", "zuoer/serde"]
 
 # ORT execution-provider passthroughs. Off by default; each implies `onnx` and
 # links the EP into ort-sys — downstream callers must still register the EP at
@@ -52,6 +52,7 @@ tensorrt = ["onnx", "ort/tensorrt"]
 openvino = ["onnx", "ort/openvino"]
 
 [dependencies]
+zuoer = "0.1"
 ort = { version = "2.0.0-rc.12", optional = true }
 thiserror = "2"
 

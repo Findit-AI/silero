@@ -67,7 +67,7 @@ fn main() -> Result<(), silero::Error> {
 ## Streaming usage
 
 ```rust
-use silero::{Session, SpeechOptions, SpeechSegmenter, StreamState};
+use silero::{Session, SpeechOptions, SpeechSegmenter, SpeechSegmenterExt, StreamState};
 
 fn main() -> Result<(), silero::Error> {
     let model = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/models/silero_vad.onnx"));
