@@ -1,6 +1,6 @@
 [package]
 name = "silero"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 rust-version = "1.88"
 repository = "https://github.com/Findit-AI/silero"
@@ -26,24 +26,33 @@ include = [
 
 [features]
 default = ["bundled"]
-bundled = []
+
+# The ONNX/ort backend: the `OnnxBackend` (`Session`) implementation of the
+# `VadBackend` seam, plus the `ort` dependency and the ORT-typed options and
+# error variants. Default-on. Turning it off (`--no-default-features`) yields a
+# logic-only crate — the backend-agnostic detector, segmenter, options, and the
+# `VadBackend` trait — with no `ort` dependency compiled at all.
+onnx = ["dep:ort"]
+# The bundled `silero_vad.onnx` model bytes. Only useful with the ONNX backend,
+# so it pulls in `onnx`.
+bundled = ["onnx"]
 serde = ["dep:serde", "dep:humantime-serde"]
 
-# ORT execution-provider passthroughs. Off by default; enabling a feature only
+# ORT execution-provider passthroughs. Off by default; each implies `onnx` and
 # links the EP into ort-sys — downstream callers must still register the EP at
 # runtime via `Session::builder().with_execution_providers([...])`. The Silero
 # graph is dominated by `If`/`Loop` control flow around `LSTM`, which CoreML
 # cannot take ownership of, so on macOS registration is a no-op and the model
 # stays on CPU regardless. CUDA/DirectML have not been measured here.
-coreml   = ["ort/coreml"]
-directml = ["ort/directml"]
-cuda     = ["ort/cuda"]
-rocm     = ["ort/rocm"]
-tensorrt = ["ort/tensorrt"]
-openvino = ["ort/openvino"]
+coreml   = ["onnx", "ort/coreml"]
+directml = ["onnx", "ort/directml"]
+cuda     = ["onnx", "ort/cuda"]
+rocm     = ["onnx", "ort/rocm"]
+tensorrt = ["onnx", "ort/tensorrt"]
+openvino = ["onnx", "ort/openvino"]
 
 [dependencies]
-ort = "2.0.0-rc.12"
+ort = { version = "2.0.0-rc.12", optional = true }
 thiserror = "2"
 
 serde = { version = "1", optional = true, features = ["derive"] }
@@ -56,12 +65,15 @@ serde_json = "1"
 [[example]]
 name = "detect_file"
 path = "examples/detect_file.rs"
+required-features = ["onnx"]
 
 [[example]]
 name = "streaming"
 path = "examples/streaming.rs"
+required-features = ["onnx"]
 
 [package.metadata.docs.rs]
+all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [lints]

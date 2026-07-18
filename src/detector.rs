@@ -1,10 +1,12 @@
 use std::collections::VecDeque;
 
 use crate::{
-  Result, Session, StreamState,
-  error::Error,
+  Result,
+  backend::VadBackend,
   options::{SampleRate, SpeechOptions},
 };
+#[cfg(feature = "onnx")]
+use crate::{Session, StreamState, error::Error};
 
 /// One speech segment on the stream timeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,9 +71,21 @@ impl SpeechSegment {
 /// frame probabilities. This lets higher-level runtimes choose between
 /// single-stream inference and micro-batched inference while still
 /// reusing the same segment semantics.
+///
+/// Its timeline advances by [`frame_samples`](Self::frame_samples) per
+/// probability. That defaults to the sample rate's model chunk size
+/// (512 samples at 16 kHz — the ONNX geometry), but a backend that
+/// declares a different frame size drives it through
+/// [`set_frame_samples`](Self::set_frame_samples) (done automatically by
+/// [`detect_speech_with`]) so the same segmentation rules apply at any
+/// frame geometry.
 #[derive(Debug, Clone)]
 pub struct SpeechSegmenter {
   options: SpeechOptions,
+  // Samples per model frame; the timeline advances by this per
+  // probability. Defaults to `sample_rate().chunk_samples()`; a
+  // non-ONNX backend overrides it via `set_frame_samples`.
+  frame_samples: u64,
   current_sample: u64,
   // Padded start sample used for emitted segments.
   active_start: Option<u64>,
@@ -92,10 +106,17 @@ pub struct SpeechSegmenter {
 
 impl SpeechSegmenter {
   /// Create a new `SpeechSegmenter` with the given options.
+  ///
+  /// The frame geometry defaults to the options' sample-rate model chunk
+  /// size (512 samples at 16 kHz). Override it with
+  /// [`set_frame_samples`](Self::set_frame_samples) for a backend that
+  /// declares a different frame size.
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub fn new(options: SpeechOptions) -> Self {
+    let frame_samples = options.sample_rate().chunk_samples() as u64;
     Self {
       options,
+      frame_samples,
       current_sample: 0,
       active_start: None,
       active_raw_start: None,
@@ -120,6 +141,9 @@ impl SpeechSegmenter {
   pub fn set_sample_rate(&mut self, sample_rate: SampleRate) {
     if self.sample_rate() != sample_rate {
       self.options.set_sample_rate(sample_rate);
+      // A new rate implies a new default frame geometry; a custom
+      // backend frame size must be re-applied via `set_frame_samples`.
+      self.frame_samples = sample_rate.chunk_samples() as u64;
       self.reset();
     }
   }
@@ -128,6 +152,36 @@ impl SpeechSegmenter {
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn sample_rate(&self) -> SampleRate {
     self.options.sample_rate()
+  }
+
+  /// Returns the number of samples per model frame that this segmenter's
+  /// timeline advances by per probability.
+  #[cfg_attr(not(tarpaulin), inline(always))]
+  pub const fn frame_samples(&self) -> usize {
+    self.frame_samples as usize
+  }
+
+  /// Set the number of samples per model frame.
+  ///
+  /// The segmenter advances its sample timeline by `frame_samples` for
+  /// each probability fed to [`push_probability`](Self::push_probability),
+  /// so this must equal the frame size of the backend producing those
+  /// probabilities — the value a [`VadBackend`] reports from
+  /// [`frame_samples`](VadBackend::frame_samples). [`detect_speech_with`]
+  /// applies it automatically; call it directly only when driving
+  /// [`push_probability`](Self::push_probability) with a custom backend
+  /// whose frame size differs from the sample rate's model chunk size.
+  ///
+  /// [`set_sample_rate`](Self::set_sample_rate) resets the frame size to
+  /// the rate's model chunk size, so apply this after any rate change.
+  ///
+  /// # Panics
+  ///
+  /// Panics if `frame_samples` is zero.
+  #[cfg_attr(not(tarpaulin), inline(always))]
+  pub fn set_frame_samples(&mut self, frame_samples: usize) {
+    assert!(frame_samples != 0, "frame_samples must be non-zero");
+    self.frame_samples = frame_samples as u64;
   }
 
   /// Returns whether the segmenter is currently active (i.e., has an ongoing speech segment).
@@ -141,10 +195,11 @@ impl SpeechSegmenter {
   /// the running sample counter, and any segments queued for
   /// `push_samples(&[])` drain.
   ///
-  /// This does not touch the `StreamState` buffer of un-chunked PCM —
-  /// that lives on the stream, not the segmenter — so callers that
-  /// reuse a stream for a new logical recording should also call
-  /// [`crate::StreamState::reset`] (or construct a fresh `StreamState`).
+  /// This does not touch the `StreamState` buffer of un-chunked PCM
+  /// (available with the `onnx` feature) — that lives on the stream, not
+  /// the segmenter — so callers that reuse a stream for a new logical
+  /// recording should also call `StreamState::reset` (or construct a
+  /// fresh `StreamState`).
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub fn reset(&mut self) {
     self.current_sample = 0;
@@ -171,7 +226,7 @@ impl SpeechSegmenter {
   /// Returns `Some(segment)` only when a speech segment can be closed
   /// with the currently available evidence.
   pub fn push_probability(&mut self, probability: f32) -> Option<SpeechSegment> {
-    let frame_samples = self.sample_rate().chunk_samples() as u64;
+    let frame_samples = self.frame_samples;
     let frame_start = self.current_sample;
     self.current_sample = self.current_sample.saturating_add(frame_samples);
 
@@ -192,7 +247,9 @@ impl SpeechSegmenter {
 
     let start = self.active_start?;
     let raw_start = self.active_raw_start?;
-    if let Some(max_speech_samples) = self.options.max_speech_samples()
+    if let Some(max_speech_samples) = self
+      .options
+      .max_speech_samples_for_frame(self.frame_samples)
       && frame_start.saturating_sub(raw_start) > max_speech_samples
     {
       return self.split_at_max_duration(frame_start, probability);
@@ -233,6 +290,8 @@ impl SpeechSegmenter {
   /// any segments still buffered from a previous call without feeding
   /// new audio — useful when a single push closed more than one
   /// segment (rare but possible at force-split).
+  #[cfg(feature = "onnx")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "onnx")))]
   pub fn push_samples(
     &mut self,
     session: &mut Session,
@@ -269,6 +328,8 @@ impl SpeechSegmenter {
   /// Drain the rest of the queue with `push_samples(&[])` when this
   /// returns a segment, in case the flush plus prior pushes left
   /// more than one waiting.
+  #[cfg(feature = "onnx")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "onnx")))]
   pub fn flush_stream(
     &mut self,
     session: &mut Session,
@@ -312,9 +373,9 @@ impl SpeechSegmenter {
   /// drain the rest; call [`Self::reset`] explicitly when starting a
   /// new stream.
   ///
-  /// This does **not** flush the model tail — use
-  /// [`Self::finish_stream`] for the combined "flush model tail +
-  /// close trailing segment" end-of-stream operation.
+  /// This does **not** flush the model tail — use `finish_stream`
+  /// (available with the `onnx` feature) for the combined "flush model
+  /// tail + close trailing segment" end-of-stream operation.
   pub fn finish(&mut self) -> Option<SpeechSegment> {
     if let Some(trailing) = self.take_trailing() {
       self.pending_segments.push_back(trailing);
@@ -335,6 +396,8 @@ impl SpeechSegmenter {
   /// segment. The pending-segment queue is left intact so the drain
   /// works; call [`Self::reset`] explicitly when starting a new
   /// stream.
+  #[cfg(feature = "onnx")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "onnx")))]
   pub fn finish_stream(
     &mut self,
     session: &mut Session,
@@ -356,6 +419,7 @@ impl SpeechSegmenter {
     Ok(self.pending_segments.pop_front())
   }
 
+  #[cfg(feature = "onnx")]
   fn ensure_sample_rate(&self, sample_rate: SampleRate) -> Result<()> {
     if self.sample_rate() == sample_rate {
       Ok(())
@@ -417,7 +481,12 @@ impl SpeechSegmenter {
 /// "detector" rather than "segmenter" terms.
 pub type SpeechDetector = SpeechSegmenter;
 
-/// Convenience helper for one-shot offline detection on a full buffer.
+/// Convenience helper for one-shot offline detection on a full buffer
+/// using the bundled ONNX backend.
+///
+/// See [`detect_speech_with`] for the backend-agnostic counterpart.
+#[cfg(feature = "onnx")]
+#[cfg_attr(docsrs, doc(cfg(feature = "onnx")))]
 pub fn detect_speech(
   session: &mut Session,
   samples: &[f32],
@@ -441,13 +510,86 @@ pub fn detect_speech(
   Ok(segments)
 }
 
+/// One-shot offline speech detection over any [`VadBackend`].
+///
+/// The backend-agnostic counterpart to `detect_speech` (the bundled
+/// `onnx` helper): it chunks `samples` into
+/// [`frame_samples`](VadBackend::frame_samples)-sized
+/// frames, runs the backend once per frame, and applies the same
+/// segmentation rules as [`SpeechSegmenter`]. A trailing partial frame
+/// is zero-padded and flushed, matching `detect_speech`'s end-of-stream
+/// behavior. The backend is *not* [`reset`](VadBackend::reset): pass a
+/// freshly constructed or reset backend to start a new stream.
+///
+/// # Sample rate
+///
+/// The backend is authoritative for its own stream: the segmenter's
+/// duration thresholds and emitted [`SpeechSegment`] stamps are taken
+/// from [`backend.sample_rate()`](VadBackend::sample_rate), overriding
+/// whatever `sample_rate` the passed `options` carried. Configure the
+/// rate on the backend, not on `options`, when driving this helper.
+///
+/// # Errors
+///
+/// Returns the backend's error, bridged into [`Error`](crate::Error), if
+/// any frame's inference fails.
+///
+/// # Panics
+///
+/// Panics if the backend reports a zero
+/// [`frame_samples`](VadBackend::frame_samples).
+pub fn detect_speech_with<B: VadBackend>(
+  backend: &mut B,
+  samples: &[f32],
+  options: SpeechOptions,
+) -> Result<Vec<SpeechSegment>> {
+  let frame = backend.frame_samples();
+  assert!(frame != 0, "VadBackend::frame_samples() must be non-zero");
+  let mut segmenter = SpeechSegmenter::new(options);
+  // The backend owns its stream's sample rate: align the segmenter's
+  // duration conversions and segment stamps to it, overriding the rate
+  // the passed options carried. `set_sample_rate` also resets the frame
+  // geometry to that rate's model chunk, so re-apply the backend's frame
+  // size afterward.
+  segmenter.set_sample_rate(backend.sample_rate());
+  segmenter.set_frame_samples(frame);
+  let mut segments = Vec::new();
+
+  let mut offset = 0;
+  while offset + frame <= samples.len() {
+    let probability = backend
+      .predict(&samples[offset..offset + frame])
+      .map_err(Into::into)?;
+    if let Some(segment) = segmenter.push_probability(probability) {
+      segments.push(segment);
+    }
+    offset += frame;
+  }
+
+  // Zero-pad and flush the trailing partial frame, mirroring
+  // `Session::flush_stream` at end-of-stream.
+  if offset < samples.len() {
+    let mut tail = vec![0.0; frame];
+    tail[..samples.len() - offset].copy_from_slice(&samples[offset..]);
+    let probability = backend.predict(&tail).map_err(Into::into)?;
+    if let Some(segment) = segmenter.push_probability(probability) {
+      segments.push(segment);
+    }
+  }
+
+  if let Some(segment) = segmenter.finish() {
+    segments.push(segment);
+  }
+  Ok(segments)
+}
+
 #[cfg(test)]
 mod tests {
   use std::time::Duration;
 
-  use crate::{SampleRate, SpeechOptions};
+  use crate::{SampleRate, SpeechOptions, VadBackend};
 
-  use super::{SpeechSegment, SpeechSegmenter};
+  use super::{SpeechSegment, SpeechSegmenter, detect_speech_with};
 
   fn frame_count(duration_ms: u32, sample_rate: SampleRate) -> usize {
     let frame_ms = (sample_rate.chunk_samples() as u32 * 1_000) / sample_rate.hz();
@@ -810,5 +952,224 @@ mod tests {
     // Active state cleared by finish() so a subsequent push could
     // start a fresh segment cleanly.
     assert!(!segmenter.is_active());
+  }
+
+  // ── Backend seam: hermetic mock (no ORT) ──────────────────────────
+
+  /// A backend error distinct from `crate::Error`, exercising the
+  /// associated-error bridge an out-of-tree backend would use.
+  #[derive(Debug)]
+  struct MockError(&'static str);
+
+  impl std::fmt::Display for MockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+      f.write_str(self.0)
+    }
+  }
+
+  impl std::error::Error for MockError {}
+
+  impl From<MockError> for crate::Error {
+    fn from(error: MockError) -> Self {
+      crate::Error::Backend(Box::new(error))
+    }
+  }
+
+  /// A `VadBackend` that returns canned probabilities — one per frame —
+  /// at a caller-declared frame geometry. It authors no detection logic;
+  /// it exists to drive the segmenter's frame math and the error bridge
+  /// without ORT.
+  struct MockBackend {
+    frame_samples: usize,
+    sample_rate: SampleRate,
+    probabilities: Vec<f32>,
+    cursor: usize,
+    fail_at: Option<usize>,
+  }
+
+  impl MockBackend {
+    fn new(frame_samples: usize, probabilities: Vec<f32>) -> Self {
+      Self {
+        frame_samples,
+        sample_rate: SampleRate::Rate16k,
+        probabilities,
+        cursor: 0,
+        fail_at: None,
+      }
+    }
+
+    fn with_sample_rate(mut self, sample_rate: SampleRate) -> Self {
+      self.sample_rate = sample_rate;
+      self
+    }
+  }
+
+  impl VadBackend for MockBackend {
+    type Error = MockError;
+
+    fn frame_samples(&self) -> usize {
+      self.frame_samples
+    }
+
+    fn sample_rate(&self) -> SampleRate {
+      self.sample_rate
+    }
+
+    fn predict(&mut self, frame: &[f32]) -> Result<f32, MockError> {
+      assert_eq!(
+        frame.len(),
+        self.frame_samples,
+        "backend must be handed exactly frame_samples per frame"
+      );
+      if self.fail_at == Some(self.cursor) {
+        return Err(MockError("mock predict failure"));
+      }
+      let probability = self.probabilities.get(self.cursor).copied().unwrap_or(0.0);
+      self.cursor += 1;
+      Ok(probability)
+    }
+
+    fn reset(&mut self) {
+      self.cursor = 0;
+    }
+  }
+
+  #[test]
+  fn set_frame_samples_overrides_the_sample_rate_default() {
+    let mut segmenter = SpeechSegmenter::new(SpeechOptions::default());
+    // The 16 kHz model chunk is the default frame geometry.
+    assert_eq!(segmenter.frame_samples(), 512);
+    segmenter.set_frame_samples(4096);
+    assert_eq!(segmenter.frame_samples(), 4096);
+  }
+
+  #[test]
+  fn detect_speech_with_uses_backend_sample_rate_not_options() {
+    // Regression (backend-seam High): the backend is authoritative for
+    // its stream's sample rate. An 8 kHz / 256-sample backend feeding
+    // 320 ms of speech (ten 0.9 frames over 2_560 samples) must produce
+    // one segment — 320 ms clears the 250 ms minimum at 8 kHz (2_000
+    // samples) — stamped 8 kHz, even though the passed options carry the
+    // default 16 kHz. Before the fix `detect_speech_with` built the
+    // segmenter straight from the 16 kHz options: it converted 250 ms to
+    // 4_000 samples, dropped the 2_560-sample run, and would have stamped
+    // any segment 16 kHz. Mutation: drop the `set_sample_rate` derivation
+    // in `detect_speech_with` → zero segments (and a 16 kHz stamp) → red.
+    let mut backend = MockBackend::new(256, vec![0.9; 10]).with_sample_rate(SampleRate::Rate8k);
+    let samples = vec![0.0_f32; 10 * 256];
+    let segments =
+      detect_speech_with(&mut backend, &samples, SpeechOptions::default()).expect("detect");
+    assert_eq!(
+      segments.len(),
+      1,
+      "320 ms of speech at the backend's 8 kHz must yield one segment"
+    );
+    assert_eq!(
+      segments[0].sample_rate(),
+      SampleRate::Rate8k,
+      "segment must be stamped with the backend's rate"
+    );
+  }
+
+  #[test]
+  fn mock_geometry_closes_after_two_256ms_low_frames() {
+    // A backend declaring 4096-sample frames makes each frame 256 ms at
+    // 16 kHz. The default `min_silence_duration_ms = 100` is 1600
+    // samples. Because the silence counter is measured BEFORE the
+    // current frame is consumed, the FIRST low frame only establishes
+    // the silence start (counter 0) and the SECOND low frame sees a full
+    // 4096-sample (256 ms) gap — which already exceeds 1600 — so the
+    // segment closes on the second low frame. This is the above-the-
+    // threshold side of the duration→frame rounding, and every boundary
+    // lands on a 4096-sample multiple.
+    let mut backend = MockBackend::new(4096, vec![0.9, 0.9, 0.9, 0.0, 0.0]);
+    let samples = vec![0.0_f32; 5 * 4096];
+    let segments =
+      detect_speech_with(&mut backend, &samples, SpeechOptions::default()).expect("detect");
+
+    assert_eq!(
+      segments.len(),
+      1,
+      "two 256 ms low frames must close one segment"
+    );
+    assert_eq!(segments[0].start_sample(), 0);
+    // raw_end = 3 * 4096 (silence start), + 30 ms speech_pad (480).
+    assert_eq!(segments[0].end_sample(), 3 * 4096 + 480);
+    // Every frame handed to the backend was consumed at 4096 samples.
+    assert_eq!(backend.cursor, 5);
+  }
+
+  #[test]
+  fn mock_geometry_holds_open_through_one_256ms_low_frame() {
+    // The below-the-threshold side: a SINGLE 256 ms low frame only
+    // establishes the silence start (counter 0 < 1600), so no segment
+    // closes mid-stream. The open segment is emitted by the end-of-
+    // stream `finish`, spanning to the raw current sample — a 4096-
+    // sample multiple with no trailing pad. Hardcoding a 512-sample
+    // frame here would advance the timeline too slowly to satisfy the
+    // 250 ms (4000-sample) minimum-speech gate and drop the segment.
+    let mut backend = MockBackend::new(4096, vec![0.9, 0.9, 0.9, 0.0]);
+    let samples = vec![0.0_f32; 4 * 4096];
+    let segments =
+      detect_speech_with(&mut backend, &samples, SpeechOptions::default()).expect("detect");
+
+    assert_eq!(
+      segments.len(),
+      1,
+      "one 256 ms low frame must not close the segment"
+    );
+    assert_eq!(segments[0].start_sample(), 0);
+    assert_eq!(segments[0].end_sample(), 4 * 4096);
+  }
+
+  #[test]
+  fn mock_geometry_max_speech_lookahead_is_frame_aware() {
+    // Regression (backend-seam Medium): the max-speech force-split
+    // lookahead must subtract the ACTIVE frame size, not the sample rate's
+    // model chunk. A 4096-sample backend at 16 kHz with a 1 s max-speech
+    // ceiling (speech_pad 0) has a frame-aware threshold of
+    // 16_000 − 4_096 = 11_904, so the first frame_start past it is 12_288
+    // (768 ms) and the split lands there. The old chunk-based threshold
+    // (16_000 − 512 = 15_488) split one frame later, at frame_start
+    // 16_384 (1.024 s) — overshooting the configured 1 s maximum. Mutation:
+    // revert the lookahead to `chunk_samples()` → the split moves to
+    // 16_384 → red.
+    let mut backend = MockBackend::new(4096, vec![0.9; 6]);
+    let samples = vec![0.0_f32; 6 * 4096];
+    let options = SpeechOptions::default()
+      .with_min_speech_duration(Duration::ZERO)
+      .with_speech_pad(Duration::ZERO)
+      .with_max_speech_duration(Duration::from_millis(1_000));
+    let segments = detect_speech_with(&mut backend, &samples, options).expect("detect");
+
+    assert_eq!(segments[0].start_sample(), 0);
+    assert_eq!(
+      segments[0].end_sample(),
+      12_288,
+      "max-speech split must land at the frame-aware 12_288, not the \
+       chunk-based overshoot 16_384"
+    );
+  }
+
+  #[test]
+  fn mock_backend_error_bridges_through_backend_variant() {
+    // The associated `VadBackend::Error` (a foreign type here) must
+    // reach the caller through the transparent `Error::Backend` variant,
+    // delegating its `Display` to the wrapped error.
+    let mut backend = MockBackend {
+      frame_samples: 4096,
+      sample_rate: SampleRate::Rate16k,
+      probabilities: vec![0.9, 0.9, 0.9],
+      cursor: 0,
+      fail_at: Some(1),
+    };
+    let samples = vec![0.0_f32; 3 * 4096];
+    let error = detect_speech_with(&mut backend, &samples, SpeechOptions::default())
+      .expect_err("backend failure must propagate");
+    assert!(
+      matches!(error, crate::Error::Backend(_)),
+      "backend error must bridge through Error::Backend, got {error:?}"
+    );
+    assert_eq!(error.to_string(), "mock predict failure");
   }
 }

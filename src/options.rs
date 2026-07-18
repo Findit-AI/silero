@@ -1,5 +1,7 @@
 use core::time::Duration;
 
+#[cfg(feature = "onnx")]
+#[cfg_attr(docsrs, doc(cfg(feature = "onnx")))]
 pub use ort::session::builder::GraphOptimizationLevel;
 
 use crate::error::{Error, Result};
@@ -7,7 +9,7 @@ use crate::error::{Error, Result};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "serde")]
+#[cfg(all(feature = "serde", feature = "onnx"))]
 mod graph_optimization_level {
   use super::GraphOptimizationLevel;
   use serde::*;
@@ -131,6 +133,8 @@ impl SampleRate {
 /// policy such as `intra_threads` / `inter_threads` should normally be
 /// configured one layer up, then passed down via
 /// [`crate::Session::from_ort_session`].
+#[cfg(feature = "onnx")]
+#[cfg_attr(docsrs, doc(cfg(feature = "onnx")))]
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct SessionOptions {
@@ -144,6 +148,7 @@ pub struct SessionOptions {
   optimization_level: GraphOptimizationLevel,
 }
 
+#[cfg(feature = "onnx")]
 impl Default for SessionOptions {
   #[inline]
   fn default() -> Self {
@@ -151,6 +156,7 @@ impl Default for SessionOptions {
   }
 }
 
+#[cfg(feature = "onnx")]
 impl SessionOptions {
   /// Create a new `SessionOptions` with default values.
   #[cfg_attr(not(tarpaulin), inline(always))]
@@ -342,18 +348,36 @@ impl SpeechOptions {
     ms_to_samples(self.min_silence_at_max_speech, self.sample_rate)
   }
 
-  /// Returns the maximum speech duration before force-splitting, in samples.
+  /// Returns the maximum speech duration before force-splitting, in
+  /// samples, for the sample rate's native model-chunk frame geometry.
   ///
-  /// This matches the upstream silero-vad derivation:
-  /// - `- chunk_samples` because the split check runs on the next frame after
-  ///   the limit is exceeded
-  /// - `- 2 * speech_pad_samples` because emitted segments pad both the end of
-  ///   the current segment and the start of the next one
+  /// This assumes the bundled ONNX backend's geometry (`chunk_samples`
+  /// per frame). A backend that declares a different frame size force-
+  /// splits on that active frame size instead: the
+  /// [`SpeechSegmenter`](crate::SpeechSegmenter) driving
+  /// [`detect_speech_with`](crate::detect_speech_with) applies its own
+  /// frame geometry automatically, so those segments honor the backend's
+  /// frame rather than this method's chunk assumption.
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub fn max_speech_samples(&self) -> Option<u64> {
+    self.max_speech_samples_for_frame(self.sample_rate.chunk_samples() as u64)
+  }
+
+  /// Returns the maximum speech samples before force-splitting for a
+  /// given per-frame geometry.
+  ///
+  /// Matches the upstream silero-vad derivation at the active frame size:
+  /// - `- frame_samples` because the split check runs on the next frame
+  ///   after the limit is exceeded — the timeline advances by the
+  ///   consuming segmenter's frame size (the sample rate's model chunk for
+  ///   the ONNX backend, but e.g. 4096 for another), not by `chunk_samples`
+  /// - `- 2 * speech_pad_samples` because emitted segments pad both the
+  ///   end of the current segment and the start of the next one
+  #[cfg_attr(not(tarpaulin), inline(always))]
+  pub(crate) fn max_speech_samples_for_frame(&self, frame_samples: u64) -> Option<u64> {
     self.max_speech_duration.map(|duration| {
       ms_to_samples(duration, self.sample_rate)
-        .saturating_sub(self.sample_rate.chunk_samples() as u64)
+        .saturating_sub(frame_samples)
         .saturating_sub(self.speech_pad_samples().saturating_mul(2))
     })
   }
@@ -549,9 +573,12 @@ const fn effective_end_threshold(start_threshold: f32, end_threshold: f32) -> f3
 mod tests {
   use std::time::Duration;
 
+  #[cfg(feature = "onnx")]
   use ort::session::builder::GraphOptimizationLevel;
 
-  use super::{SampleRate, SessionOptions, SpeechOptions, ms_to_samples};
+  #[cfg(feature = "onnx")]
+  use super::SessionOptions;
+  use super::{SampleRate, SpeechOptions, ms_to_samples};
 
   #[test]
   fn sample_rate_contract_matches_silero_model() {
@@ -589,6 +616,7 @@ mod tests {
     );
   }
 
+  #[cfg(feature = "onnx")]
   #[test]
   fn session_options_default_to_unopinionated_core_settings() {
     let options = SessionOptions::default();
@@ -626,9 +654,15 @@ mod tests {
     );
     assert_eq!(options.min_silence_at_max_speech_samples(), 1_568);
     assert_eq!(options.max_speech_samples(), Some(14_528));
+    // The public getter assumes the sample rate's native model chunk
+    // (512 at 16 kHz) as the one-frame lookahead.
+    assert_eq!(options.max_speech_samples_for_frame(512), Some(14_528));
+    // A backend that declares a larger frame subtracts THAT frame for the
+    // lookahead, not the 512-sample chunk: 16_000 − 4_096 − 2·480 = 10_944.
+    assert_eq!(options.max_speech_samples_for_frame(4_096), Some(10_944));
   }
 
-  #[cfg(feature = "serde")]
+  #[cfg(all(feature = "serde", feature = "onnx"))]
   #[test]
   fn test_serde() {
     let opts = SessionOptions::default().with_optimization_level(GraphOptimizationLevel::Level2);

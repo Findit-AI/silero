@@ -1,3 +1,9 @@
+// The integration suite exercises the ONNX-backed `Session` API, which
+// only exists with the default `onnx` feature. Under
+// `--no-default-features` the crate is logic-only, so this file compiles
+// to an empty test target.
+#![cfg(feature = "onnx")]
+
 use silero::{
   BatchInput, SampleRate, Session, SpeechOptions, SpeechSegmenter, StreamState, detect_speech,
 };

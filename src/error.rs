@@ -1,9 +1,18 @@
+#[cfg(feature = "onnx")]
 use std::path::PathBuf;
 
 /// Errors that can occur during Silero VAD operations.
+///
+/// Marked `#[non_exhaustive]` because the set of variants depends on
+/// enabled features (the ORT-typed variants require the default `onnx`
+/// feature) and grows as new backends bridge their errors through
+/// [`Error::Backend`]; downstream `match`es must include a `_` arm.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
   /// Errors related to loading the ONNX model, including file I/O and ONNX runtime errors.
+  #[cfg(feature = "onnx")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "onnx")))]
   #[error("failed to load Silero model from {path}: {source}")]
   LoadModel {
     /// The path that was attempted to be loaded (for context in the error message).
@@ -14,8 +23,24 @@ pub enum Error {
   },
 
   /// Errors related to invalid input data, such as mismatched sample rates or chunk sizes.
+  #[cfg(feature = "onnx")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "onnx")))]
   #[error(transparent)]
   Ort(#[from] ort::Error),
+
+  /// An error raised by a [`VadBackend`] implementation.
+  ///
+  /// The transparent bridge for the [`VadBackend::Error`] associated
+  /// type: the detector wraps a backend's error here so a single
+  /// [`Error`] type covers every backend. Its [`Display`] and
+  /// [`source`](std::error::Error::source) delegate to the wrapped
+  /// error.
+  ///
+  /// [`VadBackend`]: crate::VadBackend
+  /// [`VadBackend::Error`]: crate::VadBackend::Error
+  /// [`Display`]: std::fmt::Display
+  #[error(transparent)]
+  Backend(Box<dyn std::error::Error + Send + Sync + 'static>),
 
   /// Errors related to unsupported or incompatible sample rates.
   #[error(
