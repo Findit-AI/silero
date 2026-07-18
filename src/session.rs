@@ -3,10 +3,9 @@ use std::path::Path;
 use ort::{session::Session as OrtSession, value::TensorRef};
 
 use crate::{
-  Result,
-  backend::VadBackend,
+  Result, SampleRate, VadBackend,
   error::Error,
-  options::{SampleRate, SessionOptions},
+  options::SessionOptions,
   stream::{MAX_CHUNK_SAMPLES, STATE_HIDDEN_DIM, STATE_LAYERS, STATE_VALUES, StreamState},
 };
 
@@ -166,10 +165,13 @@ impl Session {
     let sample_rate = stream.sample_rate();
     let chunk_samples = sample_rate.chunk_samples();
     if chunk.len() != chunk_samples {
-      return Err(Error::InvalidChunkLength {
-        expected: chunk_samples,
-        actual: chunk.len(),
-      });
+      return Err(
+        zuoer::Error::InvalidChunkLength {
+          expected: chunk_samples,
+          actual: chunk.len(),
+        }
+        .into(),
+      );
     }
 
     let context_samples = sample_rate.context_samples();
@@ -233,16 +235,22 @@ impl Session {
 
     for item in batch.iter() {
       if item.stream.sample_rate() != sample_rate {
-        return Err(Error::MixedBatchSampleRate {
-          expected: sample_rate.hz(),
-          actual: item.stream.sample_rate().hz(),
-        });
+        return Err(
+          zuoer::Error::MixedBatchSampleRate {
+            expected: sample_rate.hz(),
+            actual: item.stream.sample_rate().hz(),
+          }
+          .into(),
+        );
       }
       if item.chunk.len() != chunk_samples {
-        return Err(Error::InvalidChunkLength {
-          expected: chunk_samples,
-          actual: item.chunk.len(),
-        });
+        return Err(
+          zuoer::Error::InvalidChunkLength {
+            expected: chunk_samples,
+            actual: item.chunk.len(),
+          }
+          .into(),
+        );
       }
     }
 
@@ -522,10 +530,13 @@ fn validate_shape(tensor: &'static str, actual: &[i64], expected: &[i64]) -> Res
   if actual == expected {
     Ok(())
   } else {
-    Err(Error::UnexpectedOutputShape {
-      tensor,
-      shape: actual.to_vec(),
-    })
+    Err(
+      zuoer::Error::UnexpectedOutputShape {
+        tensor,
+        shape: actual.to_vec(),
+      }
+      .into(),
+    )
   }
 }
 

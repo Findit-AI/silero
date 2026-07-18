@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0]
+
+### Changed
+
+- **Breaking** — the backend-agnostic VAD core now lives in the
+  [`zuoer`](https://github.com/findit-studio/zuoer) crate and is re-exported
+  here. `VadBackend`, `SpeechSegmenter`, `SpeechDetector`, `SpeechSegment`,
+  `SpeechOptions`, `SampleRate`, and `detect_speech_with` keep resolving
+  under `silero::` unchanged; `cargo build --no-default-features` is now a
+  thin re-export shell over `zuoer` (no `ort`). The bundled ONNX model,
+  `Session`, `StreamState`, `BatchInput`, `SessionOptions`,
+  `GraphOptimizationLevel`, and the `detect_speech` helper stay in this
+  crate.
+- **Breaking** — `SpeechSegmenter::{push_samples, flush_stream,
+  finish_stream}` moved to the new `SpeechSegmenterExt` extension trait,
+  since `SpeechSegmenter` is now a foreign (`zuoer`) type. Bring it into
+  scope with `use silero::SpeechSegmenterExt` to call them; behavior is
+  identical (they drive the segmenter via its `push_probabilities` /
+  `pop_pending` / `finish` sans-I/O seam).
+- **Breaking** — the backend-agnostic `Error` variants
+  (`UnsupportedSampleRate`, `IncompatibleSampleRate`, `MixedBatchSampleRate`,
+  `InvalidChunkLength`, `UnexpectedOutputShape`, `Backend`) moved to
+  `zuoer::Error` and reach `silero::Error` through the new transparent
+  `Error::Core` bridge; `Error::{LoadModel, Ort}` stay. `Display` output is
+  unchanged; `match`es on a moved variant must go through `Error::Core(..)`.
+
+### Notes
+
+- Depends on `zuoer` via a git rev pin until `zuoer` publishes `0.1.0`;
+  `silero 0.6.0` will then re-pin to `zuoer = "0.1"` before publishing.
+
 ## [0.5.0] - 2026-07-18
 
 ### Added

@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use crate::options::SampleRate;
+use crate::SampleRate;
 
 pub(crate) const STATE_LAYERS: usize = 2;
 pub(crate) const STATE_HIDDEN_DIM: usize = 128;
@@ -131,7 +131,7 @@ fn layer_range(layer: usize) -> Range<usize> {
 
 #[cfg(test)]
 mod tests {
-  use crate::options::SampleRate;
+  use crate::SampleRate;
 
   use super::StreamState;
 

@@ -1,6 +1,6 @@
 [package]
 name = "silero"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.88"
 repository = "https://github.com/Findit-AI/silero"
@@ -36,7 +36,7 @@ onnx = ["dep:ort"]
 # The bundled `silero_vad.onnx` model bytes. Only useful with the ONNX backend,
 # so it pulls in `onnx`.
 bundled = ["onnx"]
-serde = ["dep:serde", "dep:humantime-serde"]
+serde = ["dep:serde", "dep:humantime-serde", "zuoer/serde"]
 
 # ORT execution-provider passthroughs. Off by default; each implies `onnx` and
 # links the EP into ort-sys — downstream callers must still register the EP at
@@ -52,6 +52,11 @@ tensorrt = ["onnx", "ort/tensorrt"]
 openvino = ["onnx", "ort/openvino"]
 
 [dependencies]
+# The backend-agnostic VAD core: the `VadBackend` seam, `SpeechSegmenter`,
+# `SpeechOptions`, `SampleRate`, and `detect_speech_with`. Re-exported so the
+# 0.5.0 source-level API keeps resolving. Pinned to the pre-publish git rev;
+# switch to `zuoer = "0.1"` once it publishes (the 0.6.0 release gate).
+zuoer = { git = "https://github.com/findit-studio/zuoer", rev = "97f42568a90d41073d915a8f10eb07a60588efa9" }
 ort = { version = "2.0.0-rc.12", optional = true }
 thiserror = "2"
 

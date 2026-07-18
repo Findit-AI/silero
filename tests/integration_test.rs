@@ -5,7 +5,8 @@
 #![cfg(feature = "onnx")]
 
 use silero::{
-  BatchInput, SampleRate, Session, SpeechOptions, SpeechSegmenter, StreamState, detect_speech,
+  BatchInput, SampleRate, Session, SpeechOptions, SpeechSegmenter, SpeechSegmenterExt, StreamState,
+  detect_speech,
 };
 
 const MODEL_BYTES: &[u8] = include_bytes!(concat!(
