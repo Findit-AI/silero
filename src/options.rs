@@ -8,6 +8,14 @@ mod graph_optimization_level {
   use super::GraphOptimizationLevel;
   use serde::*;
 
+  /// The serde proxy for [`GraphOptimizationLevel`], which is a foreign type and
+  /// carries no serde impls of its own.
+  ///
+  /// The proxy is deliberately closed: it enumerates exactly the levels this
+  /// version of silero can name on the wire. `GraphOptimizationLevel` is
+  /// `#[non_exhaustive]` as of ort 2.0.0-rc.13, so an ort release can add a
+  /// level that has no proxy variant; that direction is therefore fallible
+  /// rather than lossy. See [`TryFrom`] below.
   #[derive(
     Debug, Default, Clone, Copy, Eq, PartialEq, Hash, Ord, PartialOrd, Serialize, Deserialize,
   )]
@@ -21,16 +29,25 @@ mod graph_optimization_level {
     All,
   }
 
-  impl From<GraphOptimizationLevel> for OptimizationLevel {
+  impl TryFrom<GraphOptimizationLevel> for OptimizationLevel {
+    type Error = GraphOptimizationLevel;
+
     #[inline]
-    fn from(value: GraphOptimizationLevel) -> Self {
-      match value {
+    fn try_from(value: GraphOptimizationLevel) -> Result<Self, Self::Error> {
+      Ok(match value {
         GraphOptimizationLevel::Disable => Self::Disable,
         GraphOptimizationLevel::Level1 => Self::Level1,
         GraphOptimizationLevel::Level2 => Self::Level2,
         GraphOptimizationLevel::Level3 => Self::Level3,
         GraphOptimizationLevel::All => Self::All,
-      }
+        // ort marked `GraphOptimizationLevel` `#[non_exhaustive]` in
+        // 2.0.0-rc.13, so a level introduced by a later ort arrives here. The
+        // dependency range still admits rc.12, where the enum is closed and
+        // this arm really is unreachable; without the `allow`, building
+        // against rc.12 fails under `-D warnings`.
+        #[allow(unreachable_patterns)]
+        other => return Err(other),
+      })
     }
   }
 
@@ -52,7 +69,13 @@ mod graph_optimization_level {
   where
     S: Serializer,
   {
-    OptimizationLevel::from(*level).serialize(serializer)
+    OptimizationLevel::try_from(*level)
+      .map_err(|unknown| {
+        <S::Error as ser::Error>::custom(format_args!(
+          "graph optimization level {unknown:?} has no serde representation in this version of silero"
+        ))
+      })?
+      .serialize(serializer)
   }
 
   #[cfg_attr(not(tarpaulin), inline(always))]
@@ -75,6 +98,23 @@ mod graph_optimization_level {
 /// policy such as `intra_threads` / `inter_threads` should normally be
 /// configured one layer up, then passed down via
 /// [`crate::Session::from_ort_session`].
+///
+/// # Serde
+///
+/// With the `serde` feature, [`optimization_level`](Self::optimization_level) is
+/// written as one of `disable`, `level1`, `level2`, `level3`, `all`.
+/// [`GraphOptimizationLevel`] is a re-export of ort's `#[non_exhaustive]` enum,
+/// so a future ort release may add a level that silero has no name for.
+/// Serializing such a value **fails** with a serde error rather than quietly
+/// substituting a different level: a silently downgraded optimization level
+/// would be an invisible change to a setting the caller asked for. If you hit
+/// that error, upgrade silero to a release that knows the level.
+///
+/// Note also that a missing `optimization_level` field deserializes to
+/// [`GraphOptimizationLevel::Disable`], which is *not* the
+/// [`Default`] used by [`SessionOptions::new`] ([`GraphOptimizationLevel::Level3`]).
+/// Serialization always emits the field, so this only affects hand-written
+/// configuration that omits it.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct SessionOptions {
@@ -111,6 +151,11 @@ impl SessionOptions {
   }
 
   /// Set the graph optimization level to use when constructing the ONNX session.
+  ///
+  /// Any level ort accepts is stored and applied verbatim. With the `serde`
+  /// feature, however, only the levels silero can name (`Disable`, `Level1`,
+  /// `Level2`, `Level3`, `All`) are serializable; see the [`SessionOptions`]
+  /// serde notes.
   #[cfg_attr(not(tarpaulin), inline(always))]
   pub const fn with_optimization_level(mut self, level: GraphOptimizationLevel) -> Self {
     self.optimization_level = level;

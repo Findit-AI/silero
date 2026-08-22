@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Build against `ort 2.0.0-rc.13`. The `ort` requirement is a caret range, so a
+  fresh resolution picks up `rc.13`, which marks
+  `GraphOptimizationLevel` `#[non_exhaustive]`; the `serde` proxy conversion
+  stopped compiling (`error[E0004]`). The conversion is now a `TryFrom` whose
+  wildcard arm carries `#[allow(unreachable_patterns)]` — required because
+  `rc.12` is still in range and the enum is closed there, where a bare wildcard
+  is an `unreachable_patterns` warning and CI builds with `-D warnings`. The
+  crate now compiles clean on both `rc.12` and `rc.13`.
+- CI no longer asks for ONNX Runtime distributions that do not exist. `rc.13`
+  made `ort-sys` prebuilt-distribution matching strict, so a link that requests
+  an execution provider the host has no build for now fails instead of silently
+  falling back to a build without it (`rc.12` fell back). `cargo hack test
+  --each-feature` was requesting every EP individually plus `--all-features`,
+  and the coverage job was requesting `--all-features`; both now skip the EP
+  features. The EP features stay compile-checked by the `build` and `clippy`
+  jobs, which never link.
+
+### Changed
+
+- **`serde`** — serializing a `SessionOptions` whose `optimization_level` is a
+  `GraphOptimizationLevel` variant this version of `silero` does not know now
+  fails with a serde error. Previously every variant was representable, so the
+  question could not arise. The alternative — substituting a level `silero` can
+  name — would silently rewrite a setting the caller asked for, which is not
+  something a serializer should do quietly. Only reachable when `silero` is
+  built against an `ort` release that has added an optimization level; the five
+  levels that exist through `rc.13` round-trip unchanged.
+
 ## [0.7.0] - 2026-08-22
 
 This is a pre-1.0 breaking release, and it is purely a dependency move:
