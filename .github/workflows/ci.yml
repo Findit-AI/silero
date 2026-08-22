@@ -157,7 +157,7 @@ jobs:
         # add no code of their own, only `ort-sys` link configuration.
         run: cargo tarpaulin --engine llvm --features serde --run-types lib --run-types tests --run-types doctests --workspace --out xml
       - name: Upload to codecov.io
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: ${{ github.repository }}
