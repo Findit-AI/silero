@@ -7,7 +7,136 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.6.0]
+## [0.7.0] - 2026-08-22
+
+This is a pre-1.0 breaking release, and it is purely a dependency move:
+`zuoer 0.1` -> `zuoer 0.2`. **No `.rs` file in this crate changed** — the
+only edits are the `zuoer` version requirement, the crate version, and this
+entry. Every break below is a `zuoer 0.2` break reaching consumers through
+the types `silero` re-exports; none of them alters the default-feature
+runtime behavior of `Session` / `detect_speech` / `detect_speech_with`.
+
+### Why
+
+`silero`'s ONNX segments are compared against other backends' segments at
+the segment level, on the premise that segment assembly is a *shared*
+baseline so any difference is attributable to model inference. A consumer
+on `zuoer 0.2` comparing against `silero` on `zuoer 0.1` breaks that
+premise by construction — the two stacks segment with different versions of
+the same library, and the next real change to `zuoer`'s segmentation would
+surface as inference drift that no test could distinguish from segmenter
+drift. This release restores the shared baseline.
+
+### Changed
+
+- **Breaking** — the `zuoer` requirement moves from `0.1` to `0.2`. A
+  consumer that names `zuoer` types through its own direct `zuoer`
+  dependency (rather than through the re-exported `silero::zuoer`) must
+  move to `0.2` in lockstep, or the two `zuoer`s will be distinct crates
+  and the types will not unify.
+- **Breaking** — `SpeechSegment` no longer implements `Eq`. It is now
+  `zuoer::Run`, which carries `f32` mean/peak probability aggregates, and
+  floats have no total equality. `PartialEq` is unchanged and now also
+  compares the aggregates; `Debug`, `Clone`, and `Copy` are unchanged. The
+  type never derived `Hash` or `Ord`, so no `HashSet`/`BTreeSet` usage can
+  be affected — only an explicit `Eq` bound, or a `#[derive(Eq)]` on a
+  struct that contains a `SpeechSegment`.
+- **Breaking (serde)** — `SpeechOptions` now serializes its duration fields
+  under `zuoer`'s neutral names: `min_speech_duration` ->
+  `min_run_duration`, `min_silence_duration` -> `min_gap_duration`,
+  `min_silence_at_max_speech` -> `min_gap_at_max_run`,
+  `max_speech_duration` -> `max_run_duration`, `speech_pad` -> `pad`. Each
+  neutral name carries the old speech-flavoured name as a deserialization
+  alias, so profiles written by `silero 0.6` still load unchanged; only the
+  serialized *output* moved. A consumer that asserts on the serialized JSON
+  keys, or that hands the JSON to a non-Rust reader keyed on the old names,
+  must follow. `SessionOptions` — this crate's own `serde` type — is
+  untouched.
+- **Breaking (behavior)** — segmentation thresholds are now floored at
+  `zuoer::RunOptions::MIN_THRESHOLD` (`0.01`) instead of `0.0`, on the
+  setter path and the `serde` path alike. A `start_threshold` of `0.0`
+  meant "every frame opens a segment", which never closed the segment and
+  derived an *inverted* hysteresis window; it is now excluded rather than
+  documented. A start or end threshold in `[0.0, 0.01)`, and a non-finite
+  one, are lifted to `0.01`. The crate default is `0.5` and nothing in this
+  crate constructs a threshold below `0.01`, so this is unreachable for
+  default callers; it is recorded because it is a silent value change for a
+  caller that passes one.
+- **Breaking (`Display`)** — `zuoer::Error::InvalidChunkLength`, which
+  reaches `silero::Error` through the transparent `Error::Core` bridge and
+  is the variant `Session::infer_chunk` / `infer_batch` raise on a
+  wrong-length chunk, drops the `VAD` qualifier: `"invalid VAD chunk
+  length: expected N samples, got M"` -> `"invalid chunk length: expected N
+  samples, got M"`. (0.5.0 rendered `"invalid Silero chunk length: ..."`.)
+  Never match on `Display` text.
+
+### Added
+
+- Nothing is added to `silero`'s own surface. `zuoer 0.2`'s new items reach
+  consumers automatically through the existing re-exports, because
+  `SpeechSegment` / `SpeechSegmenter` / `SpeechDetector` / `SpeechOptions`
+  are now plain type aliases for `zuoer`'s domain-neutral `Run` /
+  `RunSegmenter` / `RunOptions`:
+  - `SpeechSegment::mean_probability()` / `peak_probability()` — the mean
+    and peak of the frame probabilities the segment was built from,
+    accumulated in O(1) per frame over the segment's raw model-frame span
+    (`speech_pad` extension excluded, `min_silence_duration`-bridged frames
+    included). Always finite and inside `[0, 1]` on a segmenter-emitted
+    segment. This is segment confidence, and it is the natural thing for
+    `detect_speech` callers to start reading.
+  - `zuoer::RunOptions::MIN_THRESHOLD`, and the neutral `Run` /
+    `RunSegmenter` / `RunOptions` spellings, are nameable as
+    `silero::zuoer::…` without a direct `zuoer` dependency.
+
+  Whether `silero` should re-export the neutral names under `silero::`
+  alongside the `Speech*` ones is deliberately left out of this release,
+  which is scoped to the version move.
+
+### Migration
+
+- Nothing to do for the default-feature `Session` / `StreamState` /
+  `detect_speech` / `detect_speech_with` path: no signature, no default,
+  and no emitted segment boundary changed.
+- Depending on `zuoer` directly: move that requirement to `0.2` as well.
+- Requiring `Eq` on `SpeechSegment`: drop the bound (or the `derive(Eq)` on
+  the enclosing type) and rely on `PartialEq`.
+- Persisting `SpeechOptions` as JSON/TOML: reading is source-compatible
+  (the 0.1 names are aliases); writing now emits the neutral names, so
+  update any out-of-Rust consumer of that output.
+- Passing a `start_threshold` or `end_threshold` below `0.01`: pick a value
+  at or above `0.01`, since anything lower is now stored as `0.01`.
+
+### Verified
+
+`zuoer 0.1` -> `0.2` changes no segmentation. Verified differentially
+rather than by inference alone: one bundled-`Session` run per clip produces
+the frame-probability sequence, and that *same* sequence is then segmented
+by `zuoer 0.1` and `zuoer 0.2` side by side, so the model is held constant
+and only the segmenter varies. 9 real 16 kHz clips (11 s to 16 min,
+including the five `dia` parity fixtures) x 6 option sets (crate defaults,
+two `max_speech_duration` force-split settings, a permissive no-pad set, a
+strict set, and one just above the new `0.01` threshold floor) = 54
+comparisons, 0 differing segment boundaries. The default-option segment
+counts on the parity fixtures also still reproduce the counts recorded for
+0.3.0 in `tests/parity/README.md` (`02_pyannote_sample` 4,
+`03_dual_speaker` 14, `04_three_speaker` 6, `05_four_speaker` 14).
+
+- `cargo fmt --all --check`
+- `cargo clippy --all-features --all-targets --no-deps -- -D warnings`
+- `cargo test --all-features` (11 unit + 7 integration + 3 doc)
+- `cargo test --no-default-features`
+- `cargo test --doc --all-features`
+- `RUSTDOCFLAGS="-D warnings" cargo doc --all-features --no-deps`
+- `cargo publish --dry-run --allow-dirty`
+
+`tests/parity/` was **not** run: the harness's `ffmpeg-next 8` pin no
+longer builds against the locally installed system FFmpeg (a `bindgen`
+enum-variant mismatch in `ffmpeg-sys-next`). That breakage is pre-existing
+and independent of this release — it fails before any `silero` code is
+compiled — and the harness's `silero`-facing code is unchanged and still
+type-checks against `zuoer 0.2`.
+
+## [0.6.0] - 2026-07-19
 
 This is a pre-1.0 breaking release. Cargo semver permits the breaks below;
 they are documented here with per-break migration lines rather than papered

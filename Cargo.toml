@@ -1,6 +1,6 @@
 [package]
 name = "silero"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.88"
 repository = "https://github.com/Findit-AI/silero"
@@ -52,7 +52,7 @@ tensorrt = ["onnx", "ort/tensorrt"]
 openvino = ["onnx", "ort/openvino"]
 
 [dependencies]
-zuoer = "0.1"
+zuoer = "0.2"
 ort = { version = "2.0.0-rc.12", optional = true }
 thiserror = "2"
 
