@@ -113,7 +113,15 @@ jobs:
     - name: Install cargo-hack
       run: cargo install cargo-hack
     - name: Run test
-      run: cargo hack test --each-feature
+      # The ORT execution-provider features link against a prebuilt ONNX Runtime
+      # distribution that has to match the requested EP set. ort 2.0.0-rc.13 made
+      # that matching strict (rc.12 silently fell back to a best-fit build), so a
+      # runner that has no distribution for the requested EP now fails at link
+      # time rather than quietly producing a binary without the EP. No hosted
+      # runner carries every EP, and `--all-features` asks for all six at once,
+      # so those runs cannot link here. They stay compiled by the `build` and
+      # `clippy` jobs, which build only the lib and never link a binary.
+      run: cargo hack test --each-feature --exclude-all-features --exclude-features coreml,directml,cuda,rocm,tensorrt,openvino
 
   coverage:
     name: coverage
@@ -142,7 +150,12 @@ jobs:
       - name: Run tarpaulin
         env:
           RUSTFLAGS: "--cfg tarpaulin"
-        run: cargo tarpaulin --engine llvm --all-features --run-types lib --run-types tests --run-types doctests --workspace --out xml
+        # `--features serde` rather than `--all-features`: the latter enables every
+        # ORT execution provider at once, which no prebuilt ONNX Runtime
+        # distribution satisfies (see the `test` job). `serde` on top of the
+        # default features covers every non-EP line in the crate; the EP features
+        # add no code of their own, only `ort-sys` link configuration.
+        run: cargo tarpaulin --engine llvm --features serde --run-types lib --run-types tests --run-types doctests --workspace --out xml
       - name: Upload to codecov.io
         uses: codecov/codecov-action@v6
         with:

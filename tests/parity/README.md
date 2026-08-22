@@ -85,7 +85,7 @@ against `silero-vad 6.2.1` source
 
 | Parameter                    | silero crate default | silero-vad-py default | Aligned? |
 |------------------------------|----------------------|-----------------------|----------|
-| `threshold`                  | 0.5                  | 0.5                   | yes      |
+| `threshold`                  | 0.5 (clamped to >=0.01) | 0.5                | yes      |
 | `min_speech_duration_ms`     | 250                  | 250                   | yes      |
 | `min_silence_duration_ms`    | 100                  | 100                   | yes      |
 | `speech_pad_ms`              | 30                   | 30                    | yes      |
@@ -95,8 +95,17 @@ against `silero-vad 6.2.1` source
 | `window_size_samples`        | 512 (chunk_samples)  | 512                   | yes      |
 | `neg_threshold` (end_thresh) | start - 0.15 (clamped to >=0.01) | start - 0.15 | yes |
 
-(See `silero/src/options.rs:default_*` constants and the upstream
+(See the `default_*` constants in the `zuoer` crate's `src/options.rs` —
+the segmentation options moved there in silero 0.6.0 — and the upstream
 `get_speech_timestamps` function signature.)
+
+Since silero 0.7.0 (`zuoer 0.2`) both thresholds are clamped into
+`[0.01, 1]` rather than `[0, 1]`; upstream Python clamps only
+`neg_threshold`. The two therefore diverge only when `--threshold` is
+given a value below `0.01`, which is not a configuration either side is
+meant to be run in ("every frame is speech" is not a detector). At the
+default 0.5, and at every value at or above 0.01, the runners stay
+aligned.
 
 ### Off-by-one silence threshold finding (fixed in v0.3.0)
 

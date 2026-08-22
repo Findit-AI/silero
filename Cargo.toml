@@ -1,6 +1,6 @@
 [package]
 name = "silero"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 rust-version = "1.88"
 repository = "https://github.com/Findit-AI/silero"
@@ -44,6 +44,15 @@ serde = ["dep:serde", "dep:humantime-serde", "zuoer/serde"]
 # graph is dominated by `If`/`Loop` control flow around `LSTM`, which CoreML
 # cannot take ownership of, so on macOS registration is a no-op and the model
 # stays on CPU regardless. CUDA/DirectML have not been measured here.
+#
+# Enabling one of these requires an ONNX Runtime build that actually carries the
+# EP for the target. From ort 2.0.0-rc.13 onwards `ort-sys` matches its prebuilt
+# distributions strictly and fails the link when none provides the requested set,
+# instead of falling back to a build without the EP as rc.12 did. Enabling
+# several at once, or one that has no prebuilt for the host, therefore needs
+# either `ort/lax-feature-matching` (which accepts a best-fit build and so may
+# drop the EP you asked for) or an ONNX Runtime compiled from source. This crate
+# deliberately does not turn `lax-feature-matching` on for you.
 coreml   = ["onnx", "ort/coreml"]
 directml = ["onnx", "ort/directml"]
 cuda     = ["onnx", "ort/cuda"]
@@ -52,7 +61,7 @@ tensorrt = ["onnx", "ort/tensorrt"]
 openvino = ["onnx", "ort/openvino"]
 
 [dependencies]
-zuoer = "0.1"
+zuoer = "0.2"
 ort = { version = "2.0.0-rc.12", optional = true }
 thiserror = "2"
 
